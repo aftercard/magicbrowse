@@ -1,0 +1,75 @@
+{
+  "name": "@aftercard-ai/magicbrowse",
+  "version": "0.0.13",
+  "type": "module",
+  "description": "LLM-first browser-automation runtime: planner + navigator agents driving Chrome over CDP",
+  "license": "MIT AND Apache-2.0",
+  "keywords": [
+    "magicbrowse",
+    "browser",
+    "automation",
+    "ai-agent",
+    "browser-sdk",
+    "cdp",
+    "llm",
+    "puppeteer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aftercardAI/magicbrowse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aftercardAI/magicbrowse/issues"
+  },
+  "homepage": "https://github.com/aftercardAI/magicbrowse#readme",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{ recursive: true, force: true, maxRetries: 10, retryDelay: 50 })\" && tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs');fs.mkdirSync('dist/vendor',{recursive:true});fs.copyFileSync('src/vendor/buildDomTree.js','dist/vendor/buildDomTree.js');fs.copyFileSync('src/vendor/NANOBROWSER_SHA','dist/vendor/NANOBROWSER_SHA');fs.cpSync('src/adapter/i18n/locales','dist/adapter/i18n/locales',{recursive:true})\"",
+    "check-types": "tsc --noEmit",
+    "lint": "biome check --files-ignore-unknown=true README.md LICENSE biome.json scripts src vendor-notes",
+    "pack:verify": "node scripts/verify-pack-artifact.mjs",
+    "smoke:pack-install": "node scripts/verify-pack-install-smoke.mjs"
+  },
+  "dependencies": {
+    "@langchain/anthropic": "0.3.27",
+    "@langchain/cerebras": "0.0.4",
+    "@langchain/core": "0.3.80",
+    "@langchain/deepseek": "0.1.0",
+    "@langchain/google-genai": "0.2.16",
+    "@langchain/groq": "0.2.4",
+    "@langchain/ollama": "0.2.4",
+    "@langchain/openai": "0.6.16",
+    "@langchain/xai": "0.1.0",
+    "jsonrepair": "^3.13.1",
+    "libphonenumber-js": "^1.12.41",
+    "puppeteer-core": "^23.11.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "zod": "^3.24.0",
+    "zod-to-json-schema": "^3.24.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "5.9.2",
+    "@biomejs/biome": "1.9.4"
+  }
+}

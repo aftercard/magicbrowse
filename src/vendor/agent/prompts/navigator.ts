@@ -1,0 +1,37 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+import { BasePrompt } from './base.js';
+import { type HumanMessage, SystemMessage } from '@langchain/core/messages';
+import type { AgentContext } from '../types.js';
+import { navigatorSystemPromptTemplate } from './templates/navigator.js';
+import { appendPromptMemoryHints } from './memory-hints.js';
+
+export class NavigatorPrompt extends BasePrompt {
+  private systemMessage: SystemMessage;
+
+  constructor(
+    private readonly maxActionsPerStep = 10,
+    private readonly memoryHints?: string
+  ) {
+    super();
+
+    const promptTemplate = navigatorSystemPromptTemplate;
+    // Format the template with the maxActionsPerStep
+    const formattedPrompt = promptTemplate.replace('{{max_actions}}', this.maxActionsPerStep.toString()).trim();
+    this.systemMessage = new SystemMessage(
+      appendPromptMemoryHints(formattedPrompt, 'navigator', this.memoryHints)
+    );
+  }
+
+  getSystemMessage(): SystemMessage {
+    /**
+     * Get the system prompt for the agent.
+     *
+     * @returns SystemMessage containing the formatted system prompt
+     */
+    return this.systemMessage;
+  }
+
+  async getUserMessage(context: AgentContext): Promise<HumanMessage> {
+    return await this.buildBrowserStateUserMessage(context);
+  }
+}
