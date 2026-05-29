@@ -1912,7 +1912,6 @@ export class MagicBrowseSessionManager {
       fill: (options) => this.fill({ ...options, sessionId: session.id }),
       select: (options) => this.select({ ...options, sessionId: session.id }),
       press: (options) => this.press({ ...options, sessionId: session.id }),
-      fillProtectedGroup: (options) => this.fillProtectedGroup({ ...options, sessionId: session.id }),
       submitFormTarget: (options) => this.submitFormTarget({ ...options, sessionId: session.id }),
       close: () => this.close({ sessionId: session.id }),
     };

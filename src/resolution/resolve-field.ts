@@ -12,7 +12,7 @@ import {
 
 export type ResolveFieldValue = string | number | boolean | null;
 export type ResolveFieldValueType = 'text' | 'email' | 'date' | 'secret';
-export type ResolveFieldSource = 'profile_facts' | 'session_open_value' | 'resolver';
+export type ResolveFieldSource = 'memory' | 'session_open_value' | 'resolver';
 
 export type ResolveFieldApplicability =
   | { readonly target: 'global' }

@@ -4,7 +4,7 @@ export type FakeFieldValue = string | number | boolean | null;
 
 export type FakeFieldValueType = 'text' | 'email' | 'date' | 'secret';
 
-export type FakeFieldSource = 'profile_facts' | 'session_open_value' | 'resolver';
+export type FakeFieldSource = 'memory' | 'session_open_value' | 'resolver';
 
 export type FakeApplicability =
   | { readonly target: 'global' }
@@ -187,7 +187,7 @@ export function fakeCandidate(
     candidateRef,
     fieldKey,
     value,
-    source: 'profile_facts',
+    source: 'memory',
     type: 'text',
     applicability: {
       target: 'global',

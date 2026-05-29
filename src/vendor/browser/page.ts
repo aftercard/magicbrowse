@@ -1945,7 +1945,10 @@ export default class Page {
 
     if (canUseKeyboard) {
       try {
-        await this._puppeteerPage.keyboard.press('Backspace');
+        const currentValue = await this._readEditableValue(element);
+        if (currentValue.length > 0) {
+          await this._puppeteerPage.keyboard.press('Backspace');
+        }
         await this._puppeteerPage.keyboard.type(text, { delay: 50 });
         await new Promise(resolve => setTimeout(resolve, 100));
       } catch (error) {

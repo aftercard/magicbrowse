@@ -40,14 +40,6 @@ import type {
   MagicBrowseSubmitFormTargetResult,
   MagicBrowseTypeOptions,
 } from './types.js';
-import type {
-  FillOpenDataTargetInput,
-  FillOpenDataTargetResult,
-} from './resolution/fill-open-data.js';
-import type {
-  FillProtectedGroupInput,
-  FillProtectedGroupResult,
-} from './resolution/fill-protected.js';
 import { createMagicBrowseSessionManager } from './transport/session-manager.js';
 
 const defaultSessionManager = createMagicBrowseSessionManager();
@@ -116,18 +108,6 @@ export async function press(
   return defaultSessionManager.press(options);
 }
 
-export async function fillOpenDataTarget(
-  options: FillOpenDataTargetInput
-): Promise<FillOpenDataTargetResult> {
-  return defaultSessionManager.fillOpenDataTarget(options);
-}
-
-export async function fillProtectedGroup(
-  options: FillProtectedGroupInput
-): Promise<FillProtectedGroupResult> {
-  return defaultSessionManager.fillProtectedGroup(options);
-}
-
 export async function submitFormTarget(
   options: MagicBrowseSubmitFormTargetOptions
 ): Promise<MagicBrowseSubmitFormTargetResult> {
@@ -194,7 +174,11 @@ export type {
 export { DIRECT_LLM_PROVIDER_FAMILIES } from './llm/types.js';
 export { BrowserContext } from './browser/browser-context.js';
 export { Executor } from './vendor/agent/executor.js';
-export { EventType, ExecutionState, Actors } from './vendor/agent/event/types.js';
+export {
+  EventType,
+  ExecutionState,
+  Actors,
+} from './vendor/agent/event/types.js';
 export {
   createMagicBrowseSessionManager,
   DEFAULT_HUMAN_VERIFICATION_RESOLVED_TTL_SECONDS,
@@ -217,8 +201,57 @@ export {
   normalizePersistedMagicBrowseSession,
 } from './transport/session-store.js';
 export { createFileMagicBrowseRunStore } from './transport/run-store.js';
-export { resolveActivePage, readPageIdentity } from './transport/page-resolver.js';
-export { resolveAttachEndpoint, buildCdpHttpEndpointUrl } from './transport/attach-endpoint.js';
+export {
+  resolveActivePage,
+  readPageIdentity,
+} from './transport/page-resolver.js';
+export {
+  applyMemoryFillPlan,
+  buildMemoryLlmVisibleProjection,
+  createMemoryFillPlan,
+  requiresDelegatedFillAdapter,
+} from './resolution/memory-fill-plan.js';
+export {
+  buildMemoryMatchPrompt,
+  matchMemoryTargets,
+} from './resolution/memory-match.js';
+export type {
+  MemoryApplyFieldOutcome,
+  MemoryApplyFillResult,
+  MemoryBrowserFillWriter,
+  MemoryCandidateHandle,
+  MemoryFillFieldState,
+  MemoryFillPlan,
+  MemoryObservedTarget,
+  MemoryPlanBlocker,
+  MemoryPlanField,
+  MemoryDelegatedFillExecutionDescriptor,
+  MemoryRedactionProfileInstaller,
+  MemoryTargetMatch,
+} from './resolution/memory-fill-plan.js';
+export type {
+  MatchMemoryTargetResult,
+  MatchMemoryTargetsInput,
+  MatchMemoryTargetsResult,
+  MemoryDescriptorAvailability,
+  MemoryDescriptorMatcherModel,
+  MemoryDescriptorMatcherRequest,
+  MemoryFieldDescriptor,
+  MemoryMatchInvalidReason,
+  MemoryMatchNoMatchReason,
+  MemorySafeFieldDescriptor,
+  MemorySafeTargetDescriptor,
+  MemoryTargetDescriptor,
+} from './resolution/memory-match.js';
+export { classifyMemoryTargets } from './resolution/memory-target-classifier.js';
+export type {
+  MemoryTargetClassification,
+  MemoryTargetClassifierTarget,
+} from './resolution/memory-target-classifier.js';
+export {
+  resolveAttachEndpoint,
+  buildCdpHttpEndpointUrl,
+} from './transport/attach-endpoint.js';
 export { redactSensitiveText, redactSensitiveValue } from './redaction.js';
 export { buildProtectedExactValueProfile } from './redaction.js';
 export { match } from './resolution/match.js';
@@ -363,12 +396,7 @@ export type {
   OpenDataValueProjectionResult,
   ProjectOpenDataValueForTargetInput,
 } from './resolution/value-projection.js';
-export type {
-  FillOpenDataTargetBlockedReason,
-  FillOpenDataTargetInput,
-  FillOpenDataTargetResult,
-  FillOpenDataTargetStatus,
-} from './resolution/fill-open-data.js';
+export type { MagicBrowseProtectedFieldKey } from './resolution/protected-fields.js';
 export type {
   MagicBrowseProtectedArtifactReadInput,
   MagicBrowseProtectedArtifactReadResult,
@@ -378,14 +406,8 @@ export type {
   MagicBrowseProtectedAssistiveResolutionResult,
   MagicBrowseProtectedAssistiveResolver,
   MagicBrowseProtectedFillTargetDescriptor,
-  FillProtectedGroupBlockedReason,
-  FillProtectedGroupInput,
-  FillProtectedGroupResult,
-  FillProtectedGroupStatus,
-  ProtectedFieldFillError,
-  ProtectedFilledFieldRef,
+  MagicBrowseProtectedFieldWriter,
 } from './resolution/fill-protected.js';
-export type { MagicBrowseProtectedFieldKey } from './resolution/protected-fields.js';
 export type {
   MagicBrowseSemanticApplicability,
   MagicBrowseSemanticCandidateDescriptor,

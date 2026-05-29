@@ -22,8 +22,8 @@ The package has four main parts:
 - **LLM-driven action** - `act(...)` runs the planner and navigator against an
   explicit LLM adapter and returns a typed terminal status.
 - **Deterministic apply steps** - `click(...)`, `type(...)`, `fill(...)`,
-  `select(...)`, `press(...)`, open-data fill helpers, and protected-fill
-  helpers execute known actions without asking the LLM to invent values.
+  `select(...)`, and `press(...)` execute known actions without asking the LLM
+  to invent values.
 
 Typical workflow:
 
@@ -218,8 +218,6 @@ provider connection URLs are redacted from returned data.
 | `fill(options)` | You want to clear and fill an observed target | deterministic action result |
 | `select(options)` | You want to choose an option on an observed select target | deterministic action result |
 | `press(options)` | You want to send a key chord to the focused page | deterministic action result |
-| `fillOpenDataTarget(options)` | You want to apply non-protected user-provided data | field-level fill result |
-| `fillProtectedGroup(options)` | You want to apply protected data through a guarded reader | group-level protected fill result |
 | `submitFormTarget(options)` | You want to submit a known observed form target | submit result |
 | `markCaptchaResolved(options?)` | A human or approved solver resolved CAPTCHA on the current page | single-use trusted continuation marker |
 | `close(options?)` | You are done with the browser | owned browser closed or attached session cleared |
@@ -249,34 +247,17 @@ protected-data owner completes the fill, call `act(...)` again with that narrow
 
 ## Open Data And Protected Data
 
-MagicBrowse separates ordinary open-data fills from protected-data fills.
+MagicBrowse keeps ordinary open-data and protected-data orchestration outside
+the public root API. Host applications should observe the page, decide which
+data is available, and then call deterministic browser verbs such as `fill(...)`
+and `select(...)` with explicit values.
 
 Open data is information the user has already provided clearly for the current
 task, such as a city, travel date, quantity, or public profile detail.
 
-```ts
-import { fillOpenDataTarget, observe } from '@aftercard-ai/magicbrowse';
-
-const page = await observe({ includeOrchestration: true });
-const cityTarget = page.orchestration?.fillableTargets?.descriptors.find(
-  (target) => target.label?.toLowerCase().includes('city')
-);
-
-if (cityTarget) {
-  await fillOpenDataTarget({
-    target: cityTarget,
-    value: {
-      value: 'Singapore',
-      source: 'user',
-    },
-  });
-}
-```
-
 Protected data is sensitive information such as passwords, OTPs, payment card
-data, identity documents, bank details, API keys, private keys, and secrets.
-MagicBrowse can apply protected values only through an explicit artifact reader
-provided by the caller. The LLM is not asked to invent or handle those values.
+data, identity documents, bank details, API keys, private keys, and secrets. The
+LLM is not asked to invent or handle those values.
 
 Core rules:
 

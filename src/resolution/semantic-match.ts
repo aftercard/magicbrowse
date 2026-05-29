@@ -11,7 +11,7 @@ export type MagicBrowseSemanticConfidence = 'high' | 'medium' | 'low';
 export type MagicBrowseSemanticValueType = 'text' | 'email' | 'date' | 'secret';
 
 export type MagicBrowseSemanticCandidateSource =
-  | 'profile_facts'
+  | 'memory'
   | 'session_open_value'
   | 'resolver';
 

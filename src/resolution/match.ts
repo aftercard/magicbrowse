@@ -429,7 +429,7 @@ function isOpenDataCandidateDescriptor(value: unknown): value is OpenDataCandida
 }
 
 function isOpenDataCandidateSource(value: unknown): boolean {
-  return value === 'profile_facts' || value === 'session_open_value' || value === 'resolver';
+  return value === 'memory' || value === 'session_open_value' || value === 'resolver';
 }
 
 function isOpenDataCandidateValueType(value: unknown): value is OpenDataCandidateValueType {

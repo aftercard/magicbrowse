@@ -1,10 +1,6 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { ExecutionEventKind } from './vendor/agent/event/types.js';
 import type { MagicBrowseLlmAdapter } from './llm/types.js';
-import type {
-  FillProtectedGroupInput,
-  FillProtectedGroupResult,
-} from './resolution/fill-protected.js';
 import type { ProtectedRedactionProfiles } from './redaction.js';
 
 export interface MagicBrowseViewport {
@@ -478,9 +474,6 @@ export interface MagicBrowseManagedSession {
   press(
     opts: Omit<MagicBrowsePressOptions, 'sessionId'>
   ): Promise<MagicBrowseDeterministicActionResult>;
-  fillProtectedGroup(
-    opts: Omit<FillProtectedGroupInput, 'sessionId'>
-  ): Promise<FillProtectedGroupResult>;
   submitFormTarget(
     opts: Omit<MagicBrowseSubmitFormTargetOptions, 'sessionId'>
   ): Promise<MagicBrowseSubmitFormTargetResult>;
