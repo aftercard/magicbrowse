@@ -1,50 +1,50 @@
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
 import {
-  buildProtectedExactValueProfile,
-  type ProtectedExactValueProfile,
+  buildExactValueRedactionProfile,
+  type ExactValueRedactionProfile,
 } from '../redaction.js';
 import type {
   MagicBrowseMatchGroupResult,
   MagicBrowseMatchGroupCandidate,
   MagicBrowseMatchGroupField,
   MagicBrowseMatchGroupSubject,
-  MagicBrowseProtectedFieldPolicy,
+  MagicBrowseMemoryFieldPolicy,
 } from './match.js';
 import {
-  projectProtectedFillOperations,
-  type MagicBrowseProtectedProjectionErrorReason,
-  type MagicBrowseProtectedProjectionTarget,
-} from './protected-projection.js';
+  projectMemoryDelegatedFillOperations,
+  type MagicBrowseMemoryDelegatedProjectionErrorReason,
+  type MagicBrowseMemoryDelegatedProjectionTarget,
+} from './memory-delegated-projection.js';
 
-export type FillProtectedGroupStatus = 'filled' | 'field_errors' | 'blocked';
+export type MemoryDelegatedFillStatus = 'filled' | 'field_errors' | 'blocked';
 
-export type FillProtectedGroupBlockedReason =
-  | MagicBrowseProtectedProjectionErrorReason
+export type MemoryDelegatedFillBlockedReason =
+  | MagicBrowseMemoryDelegatedProjectionErrorReason
   | 'artifact_unavailable'
   | 'target_missing'
-  | 'unsupported_protected_field_group'
+  | 'unsupported_memory_field_group'
   | 'invalid_expiry_value'
   | 'match_not_ready'
   | 'unknown_candidate_ref'
   | 'assistive_low_confidence'
   | 'assistive_unavailable';
 
-export interface ProtectedFilledFieldRef {
+export interface MemoryDelegatedFilledFieldRef {
   readonly fieldKey: string;
   readonly targetRef: string;
 }
 
-export interface ProtectedFieldFillError extends ProtectedFilledFieldRef {
+export interface MemoryDelegatedFieldFillError extends MemoryDelegatedFilledFieldRef {
   readonly reason: 'value_not_applied';
 }
 
-export interface MagicBrowseProtectedArtifactReadInput {
+export interface MagicBrowseMemoryDelegatedArtifactReadInput {
   readonly artifactRef: string;
   readonly subject: MagicBrowseMatchGroupSubject;
   readonly candidate: MagicBrowseMatchGroupCandidate;
 }
 
-export type MagicBrowseProtectedArtifactReadResult =
+export type MagicBrowseMemoryDelegatedArtifactReadResult =
   | {
       readonly status: 'resolved';
       readonly values: Readonly<Record<string, string | undefined>>;
@@ -54,27 +54,27 @@ export type MagicBrowseProtectedArtifactReadResult =
       readonly reason: 'artifact_unavailable';
     };
 
-export interface MagicBrowseProtectedArtifactReader {
-  read(input: MagicBrowseProtectedArtifactReadInput): Promise<MagicBrowseProtectedArtifactReadResult>;
+export interface MagicBrowseMemoryDelegatedArtifactReader {
+  read(input: MagicBrowseMemoryDelegatedArtifactReadInput): Promise<MagicBrowseMemoryDelegatedArtifactReadResult>;
 }
 
-export interface MagicBrowseProtectedAssistiveBinding {
+export interface MagicBrowseMemoryDelegatedAssistiveBinding {
   readonly fieldKey: string;
   readonly targetRef: string;
   readonly valueHint?: string;
   readonly label?: string;
-  readonly protectedValue: string;
-  readonly target: MagicBrowseProtectedFillTargetDescriptor;
+  readonly memoryValue: string;
+  readonly target: MagicBrowseMemoryDelegatedFillTargetDescriptor;
 }
 
-export interface MagicBrowseProtectedAssistiveResolutionInput {
+export interface MagicBrowseMemoryDelegatedAssistiveResolutionInput {
   readonly artifactRef: string;
   readonly subject: MagicBrowseMatchGroupSubject;
   readonly candidate: MagicBrowseMatchGroupCandidate;
-  readonly bindings: readonly MagicBrowseProtectedAssistiveBinding[];
+  readonly bindings: readonly MagicBrowseMemoryDelegatedAssistiveBinding[];
 }
 
-export type MagicBrowseProtectedAssistiveResolutionResult =
+export type MagicBrowseMemoryDelegatedAssistiveResolutionResult =
   | {
       readonly status: 'resolved';
       readonly confidence: 'high' | 'medium' | 'low';
@@ -88,56 +88,56 @@ export type MagicBrowseProtectedAssistiveResolutionResult =
       readonly reason?: string;
     };
 
-export interface MagicBrowseProtectedAssistiveResolver {
+export interface MagicBrowseMemoryDelegatedAssistiveResolver {
   resolve(
-    input: MagicBrowseProtectedAssistiveResolutionInput
-  ): Promise<MagicBrowseProtectedAssistiveResolutionResult>;
+    input: MagicBrowseMemoryDelegatedAssistiveResolutionInput
+  ): Promise<MagicBrowseMemoryDelegatedAssistiveResolutionResult>;
 }
 
-export interface MagicBrowseProtectedFillTargetDescriptor extends MagicBrowseProtectedProjectionTarget {
+export interface MagicBrowseMemoryDelegatedFillTargetDescriptor extends MagicBrowseMemoryDelegatedProjectionTarget {
   readonly kind?: string;
   readonly selectorMapIndex?: number;
 }
 
-export interface MagicBrowseProtectedFieldWriter {
+export interface MagicBrowseMemoryDelegatedFieldWriter {
   fill(input: {
     readonly targetRef: string;
     readonly value: string;
   }): Promise<void>;
 }
 
-export interface FillProtectedGroupInput {
+export interface MemoryDelegatedFillInput {
   readonly sessionId?: string;
   readonly subject: MagicBrowseMatchGroupSubject;
   readonly match: MagicBrowseMatchGroupResult;
   readonly candidates: readonly MagicBrowseMatchGroupCandidate[];
-  readonly artifactReader: MagicBrowseProtectedArtifactReader;
-  readonly assistiveResolver?: MagicBrowseProtectedAssistiveResolver;
+  readonly artifactReader: MagicBrowseMemoryDelegatedArtifactReader;
+  readonly assistiveResolver?: MagicBrowseMemoryDelegatedAssistiveResolver;
 }
 
-export interface FillProtectedGroupExecutionInput {
+export interface MemoryDelegatedFillExecutionInput {
   readonly artifactRef: string;
   readonly subject: MagicBrowseMatchGroupSubject;
   readonly candidate: MagicBrowseMatchGroupCandidate;
-  readonly targets: readonly MagicBrowseProtectedFillTargetDescriptor[];
-  readonly artifactReader: MagicBrowseProtectedArtifactReader;
-  readonly writer: MagicBrowseProtectedFieldWriter;
-  readonly assistiveResolver?: MagicBrowseProtectedAssistiveResolver;
+  readonly targets: readonly MagicBrowseMemoryDelegatedFillTargetDescriptor[];
+  readonly artifactReader: MagicBrowseMemoryDelegatedArtifactReader;
+  readonly writer: MagicBrowseMemoryDelegatedFieldWriter;
+  readonly assistiveResolver?: MagicBrowseMemoryDelegatedAssistiveResolver;
   readonly runRecorder?: MagicBrowseRunRecorder;
   readonly redactionProfileRef?: string;
-  readonly onProtectedRedactionProfile?: (
+  readonly onRedactionProfile?: (
     profileRef: string,
-    profile: ProtectedExactValueProfile
+    profile: ExactValueRedactionProfile
   ) => void | Promise<void>;
 }
 
-export type FillProtectedGroupResult =
+export type MemoryDelegatedFillResult =
   | {
       readonly status: 'filled';
       readonly fillRef: string;
       readonly candidateRef: string;
       readonly artifactRef: string;
-      readonly filledFields: readonly ProtectedFilledFieldRef[];
+      readonly filledFields: readonly MemoryDelegatedFilledFieldRef[];
       readonly summary: string;
     }
   | {
@@ -145,13 +145,13 @@ export type FillProtectedGroupResult =
       readonly fillRef: string;
       readonly candidateRef: string;
       readonly artifactRef: string;
-      readonly filledFields: readonly ProtectedFilledFieldRef[];
-      readonly fieldErrors: readonly ProtectedFieldFillError[];
+      readonly filledFields: readonly MemoryDelegatedFilledFieldRef[];
+      readonly fieldErrors: readonly MemoryDelegatedFieldFillError[];
       readonly summary: string;
     }
   | {
       readonly status: 'blocked';
-      readonly reason: FillProtectedGroupBlockedReason;
+      readonly reason: MemoryDelegatedFillBlockedReason;
       readonly fillRef: string;
       readonly candidateRef: string;
       readonly artifactRef: string;
@@ -160,39 +160,39 @@ export type FillProtectedGroupResult =
       readonly summary: string;
     };
 
-type PreparedProtectedFillOperation = {
+type PreparedMemoryDelegatedFillOperation = {
   readonly targetRef: string;
-  readonly target: MagicBrowseProtectedFillTargetDescriptor;
+  readonly target: MagicBrowseMemoryDelegatedFillTargetDescriptor;
   readonly value: string;
-  readonly fields: readonly ProtectedFilledFieldRef[];
-  readonly assistiveFallback?: MagicBrowseProtectedAssistiveBinding;
+  readonly fields: readonly MemoryDelegatedFilledFieldRef[];
+  readonly assistiveFallback?: MagicBrowseMemoryDelegatedAssistiveBinding;
 };
 
 type PreparedProjectedField = {
   readonly field: MagicBrowseMatchGroupField;
-  readonly target: MagicBrowseProtectedFillTargetDescriptor;
+  readonly target: MagicBrowseMemoryDelegatedFillTargetDescriptor;
   readonly deterministicValue: string;
-  readonly fields: readonly ProtectedFilledFieldRef[];
+  readonly fields: readonly MemoryDelegatedFilledFieldRef[];
   readonly assistive: boolean;
   readonly selectAssistiveFallback: boolean;
 };
 
-type PrepareProtectedFillOperationsResult =
+type PrepareMemoryDelegatedFillOperationsResult =
   | {
       readonly status: 'ready';
-      readonly operations: readonly PreparedProtectedFillOperation[];
+      readonly operations: readonly PreparedMemoryDelegatedFillOperation[];
     }
   | {
       readonly status: 'blocked';
-      readonly reason: FillProtectedGroupBlockedReason;
+      readonly reason: MemoryDelegatedFillBlockedReason;
       readonly targetRef?: string;
       readonly fieldKey?: string;
     };
 
-export async function fillProtectedGroup(
-  input: FillProtectedGroupExecutionInput
-): Promise<FillProtectedGroupResult> {
-  await appendProtectedFillEvent(input, 'protected_fill.start', {
+export async function executeMemoryDelegatedFill(
+  input: MemoryDelegatedFillExecutionInput
+): Promise<MemoryDelegatedFillResult> {
+  await appendMemoryDelegatedFillEvent(input, 'memory_delegated_fill.start', {
     status: 'started',
     fillRef: input.subject.fillRef,
     candidateRef: input.candidate.candidateRef,
@@ -201,7 +201,7 @@ export async function fillProtectedGroup(
     ...(input.candidate.fieldPolicies ? { fieldPolicies: input.candidate.fieldPolicies } : {}),
   });
 
-  const targetValidation = validateProtectedFillTargets(input);
+  const targetValidation = validateMemoryDelegatedFillTargets(input);
   if (targetValidation.status === 'blocked') {
     return block(input, targetValidation.reason, {
       targetRef: targetValidation.targetRef,
@@ -218,18 +218,18 @@ export async function fillProtectedGroup(
     return block(input, artifact.reason);
   }
 
-  const profile = buildProtectedExactValueProfile(artifact.values);
+  const profile = buildExactValueRedactionProfile(artifact.values);
   if (Object.keys(profile.rules).length > 0) {
     const profileRef = input.redactionProfileRef ?? input.artifactRef;
     await input.runRecorder?.update({
-      protectedRedactionProfiles: {
+      redactionProfiles: {
         [profileRef]: profile,
       },
     });
-    await input.onProtectedRedactionProfile?.(profileRef, profile);
+    await input.onRedactionProfile?.(profileRef, profile);
   }
 
-  const prepared = await prepareProtectedFillOperations(input, artifact.values);
+  const prepared = await prepareMemoryDelegatedFillOperations(input, artifact.values);
   if (prepared.status === 'blocked') {
     return block(input, prepared.reason, {
       targetRef: prepared.targetRef,
@@ -237,8 +237,8 @@ export async function fillProtectedGroup(
     });
   }
 
-  const filledFields: ProtectedFilledFieldRef[] = [];
-  const fieldErrors: ProtectedFieldFillError[] = [];
+  const filledFields: MemoryDelegatedFilledFieldRef[] = [];
+  const fieldErrors: MemoryDelegatedFieldFillError[] = [];
   for (const operation of prepared.operations) {
     try {
       await input.writer.fill({
@@ -269,7 +269,7 @@ export async function fillProtectedGroup(
   }
 
   if (fieldErrors.length > 0) {
-    const result: FillProtectedGroupResult = {
+    const result: MemoryDelegatedFillResult = {
       status: 'field_errors',
       fillRef: input.subject.fillRef,
       candidateRef: input.candidate.candidateRef,
@@ -280,7 +280,7 @@ export async function fillProtectedGroup(
         fieldCount: filledFields.length,
       }),
     };
-    await appendProtectedFillEvent(input, 'protected_fill.field_errors', {
+    await appendMemoryDelegatedFillEvent(input, 'memory_delegated_fill.field_errors', {
       status: result.status,
       fillRef: result.fillRef,
       candidateRef: result.candidateRef,
@@ -291,7 +291,7 @@ export async function fillProtectedGroup(
     return result;
   }
 
-  const result: FillProtectedGroupResult = {
+  const result: MemoryDelegatedFillResult = {
     status: 'filled',
     fillRef: input.subject.fillRef,
     candidateRef: input.candidate.candidateRef,
@@ -301,7 +301,7 @@ export async function fillProtectedGroup(
       fieldCount: filledFields.length,
     }),
   };
-  await appendProtectedFillEvent(input, 'protected_fill.complete', {
+  await appendMemoryDelegatedFillEvent(input, 'memory_delegated_fill.complete', {
     status: result.status,
     fillRef: result.fillRef,
     candidateRef: result.candidateRef,
@@ -311,15 +311,15 @@ export async function fillProtectedGroup(
   return result;
 }
 
-async function prepareProtectedFillOperations(
-  input: FillProtectedGroupExecutionInput,
-  protectedValues: Readonly<Record<string, string | undefined>>
-): Promise<PrepareProtectedFillOperationsResult> {
+async function prepareMemoryDelegatedFillOperations(
+  input: MemoryDelegatedFillExecutionInput,
+  memoryValues: Readonly<Record<string, string | undefined>>
+): Promise<PrepareMemoryDelegatedFillOperationsResult> {
   const targetByRef = new Map(input.targets.map((target) => [target.targetRef, target]));
-  const projected = projectProtectedFillOperations({
+  const projected = projectMemoryDelegatedFillOperations({
     fields: input.subject.fields,
     targets: input.targets,
-    protectedValues,
+    memoryValues,
   });
   if (projected.status === 'blocked') {
     return projected;
@@ -329,7 +329,7 @@ async function prepareProtectedFillOperations(
   const projectedOperations: Array<
     | {
         readonly kind: 'operation';
-        readonly operation: PreparedProtectedFillOperation;
+        readonly operation: PreparedMemoryDelegatedFillOperation;
       }
     | {
         readonly kind: 'field';
@@ -364,8 +364,8 @@ async function prepareProtectedFillOperations(
 
     const field = operation.fields[0]!;
     const assistiveEligible =
-      resolveProtectedFieldPolicy(input.candidate, field.fieldKey) === 'llm_assisted' &&
-      shouldAssistProtectedField(field);
+      resolveMemoryDelegatedFieldPolicy(input.candidate, field.fieldKey) === 'llm_assisted' &&
+      shouldAssistMemoryDelegatedField(field);
     const preparedField: PreparedProjectedField = {
       field,
       target,
@@ -381,12 +381,12 @@ async function prepareProtectedFillOperations(
     });
   }
 
-  const assistiveValues = await resolveAssistiveValues(input, protectedValues, preparedFields);
+  const assistiveValues = await resolveAssistiveValues(input, memoryValues, preparedFields);
   if (assistiveValues.status === 'blocked') {
     return assistiveValues;
   }
 
-  const operations = projectedOperations.map((item): PreparedProtectedFillOperation => {
+  const operations = projectedOperations.map((item): PreparedMemoryDelegatedFillOperation => {
     if (item.kind === 'operation') {
       return item.operation;
     }
@@ -397,17 +397,17 @@ async function prepareProtectedFillOperations(
       assistiveValues.values.get(targetRef) ??
       assistiveValues.values.get(`${preparedField.field.fieldKey}:${targetRef}`) ??
       preparedField.deterministicValue;
-    const protectedValue = protectedValues[preparedField.field.fieldKey];
+    const memoryValue = memoryValues[preparedField.field.fieldKey];
     const assistiveFallback =
       preparedField.selectAssistiveFallback &&
-      typeof protectedValue === 'string' &&
-      protectedValue.trim().length > 0
+      typeof memoryValue === 'string' &&
+      memoryValue.trim().length > 0
         ? {
             fieldKey: preparedField.field.fieldKey,
             targetRef,
             ...(preparedField.field.valueHint ? { valueHint: preparedField.field.valueHint } : {}),
             ...(preparedField.field.label ? { label: preparedField.field.label } : {}),
-            protectedValue: protectedValue.trim(),
+            memoryValue: memoryValue.trim(),
             target: preparedField.target,
           }
         : undefined;
@@ -426,8 +426,8 @@ async function prepareProtectedFillOperations(
   };
 }
 
-function validateProtectedFillTargets(
-  input: FillProtectedGroupExecutionInput
+function validateMemoryDelegatedFillTargets(
+  input: MemoryDelegatedFillExecutionInput
 ):
   | {
       readonly status: 'ready';
@@ -453,14 +453,14 @@ function validateProtectedFillTargets(
 }
 
 async function fillWithAssistiveFallback(
-  input: FillProtectedGroupExecutionInput,
-  operation: PreparedProtectedFillOperation
+  input: MemoryDelegatedFillExecutionInput,
+  operation: PreparedMemoryDelegatedFillOperation
 ): Promise<
   | { readonly status: 'filled' }
   | { readonly status: 'unavailable' }
   | {
       readonly status: 'blocked';
-      readonly reason: FillProtectedGroupBlockedReason;
+      readonly reason: MemoryDelegatedFillBlockedReason;
       readonly targetRef?: string;
       readonly fieldKey?: string;
     }
@@ -514,11 +514,11 @@ async function fillWithAssistiveFallback(
 }
 
 async function resolveAssistiveValues(
-  input: FillProtectedGroupExecutionInput,
-  protectedValues: Readonly<Record<string, string | undefined>>,
+  input: MemoryDelegatedFillExecutionInput,
+  memoryValues: Readonly<Record<string, string | undefined>>,
   preparedFields: readonly {
     readonly field: MagicBrowseMatchGroupField;
-    readonly target: MagicBrowseProtectedFillTargetDescriptor;
+    readonly target: MagicBrowseMemoryDelegatedFillTargetDescriptor;
     readonly deterministicValue: string;
     readonly assistive: boolean;
     readonly selectAssistiveFallback: boolean;
@@ -530,21 +530,21 @@ async function resolveAssistiveValues(
     }
   | {
       readonly status: 'blocked';
-      readonly reason: FillProtectedGroupBlockedReason;
+      readonly reason: MemoryDelegatedFillBlockedReason;
       readonly targetRef?: string;
       readonly fieldKey?: string;
     }
 > {
-  const assistiveBindings: MagicBrowseProtectedAssistiveBinding[] = [];
+  const assistiveBindings: MagicBrowseMemoryDelegatedAssistiveBinding[] = [];
   for (const item of preparedFields) {
     if (!item.assistive) {
       continue;
     }
-    const protectedValue = protectedValues[item.field.fieldKey];
-    if (typeof protectedValue !== 'string' || protectedValue.trim().length === 0) {
+    const memoryValue = memoryValues[item.field.fieldKey];
+    if (typeof memoryValue !== 'string' || memoryValue.trim().length === 0) {
       return {
         status: 'blocked',
-        reason: 'missing_protected_value',
+        reason: 'missing_memory_value',
         targetRef: item.field.targetRef,
         fieldKey: item.field.fieldKey,
       };
@@ -554,7 +554,7 @@ async function resolveAssistiveValues(
       targetRef: item.field.targetRef,
       ...(item.field.valueHint ? { valueHint: item.field.valueHint } : {}),
       ...(item.field.label ? { label: item.field.label } : {}),
-      protectedValue: protectedValue.trim(),
+      memoryValue: memoryValue.trim(),
       target: item.target,
     });
   }
@@ -608,7 +608,7 @@ async function resolveAssistiveValues(
   };
 }
 
-function shouldAssistProtectedField(field: MagicBrowseMatchGroupField): boolean {
+function shouldAssistMemoryDelegatedField(field: MagicBrowseMatchGroupField): boolean {
   if (field.fieldKey === 'full_name' || field.fieldKey === 'date_of_birth') {
     return false;
   }
@@ -622,7 +622,7 @@ function uniqueFieldKeys(fields: readonly MagicBrowseMatchGroupField[]): readonl
   return [...new Set(fields.map((field) => field.fieldKey))];
 }
 
-function fieldRef(field: MagicBrowseMatchGroupField): ProtectedFilledFieldRef {
+function fieldRef(field: MagicBrowseMatchGroupField): MemoryDelegatedFilledFieldRef {
   return {
     fieldKey: field.fieldKey,
     targetRef: field.targetRef,
@@ -630,14 +630,14 @@ function fieldRef(field: MagicBrowseMatchGroupField): ProtectedFilledFieldRef {
 }
 
 async function block(
-  input: FillProtectedGroupExecutionInput,
-  reason: FillProtectedGroupBlockedReason,
+  input: MemoryDelegatedFillExecutionInput,
+  reason: MemoryDelegatedFillBlockedReason,
   refs: {
     readonly targetRef?: string;
     readonly fieldKey?: string;
   } = {}
-): Promise<FillProtectedGroupResult> {
-  const result: FillProtectedGroupResult = {
+): Promise<MemoryDelegatedFillResult> {
+  const result: MemoryDelegatedFillResult = {
     status: 'blocked',
     reason,
     fillRef: input.subject.fillRef,
@@ -649,7 +649,7 @@ async function block(
       reason,
     }),
   };
-  await appendProtectedFillEvent(input, 'protected_fill.blocked', {
+  await appendMemoryDelegatedFillEvent(input, 'memory_delegated_fill.blocked', {
     status: result.status,
     reason,
     fillRef: result.fillRef,
@@ -662,15 +662,15 @@ async function block(
 }
 
 function buildSummary(
-  status: FillProtectedGroupStatus,
-  input: FillProtectedGroupExecutionInput,
+  status: MemoryDelegatedFillStatus,
+  input: MemoryDelegatedFillExecutionInput,
   details: {
     readonly fieldCount?: number;
-    readonly reason?: FillProtectedGroupBlockedReason;
+    readonly reason?: MemoryDelegatedFillBlockedReason;
   } = {}
 ): string {
   const pieces = [
-    `protected_fill ${status}`,
+    `memory_delegated_fill ${status}`,
     `fill=${input.subject.fillRef}`,
     `candidate=${input.candidate.candidateRef}`,
     typeof details.fieldCount === 'number' ? `fields=${details.fieldCount}` : undefined,
@@ -679,14 +679,14 @@ function buildSummary(
   return pieces.join(' ');
 }
 
-async function appendProtectedFillEvent(
-  input: FillProtectedGroupExecutionInput,
+async function appendMemoryDelegatedFillEvent(
+  input: MemoryDelegatedFillExecutionInput,
   type: string,
   data: Record<string, unknown>
 ): Promise<void> {
   await input.runRecorder?.append({
     type,
-    level: type === 'protected_fill.field_errors' ? 'warn' : 'info',
+    level: type === 'memory_delegated_fill.field_errors' ? 'warn' : 'info',
     data: omitUndefined({
       sessionId: input.runRecorder.sessionId,
       runId: input.runRecorder.runId,
@@ -695,10 +695,10 @@ async function appendProtectedFillEvent(
   });
 }
 
-function resolveProtectedFieldPolicy(
+function resolveMemoryDelegatedFieldPolicy(
   candidate: MagicBrowseMatchGroupCandidate,
   fieldKey: string
-): MagicBrowseProtectedFieldPolicy {
+): MagicBrowseMemoryFieldPolicy {
   return candidate.fieldPolicies?.[fieldKey] ?? 'deterministic_only';
 }
 
@@ -708,6 +708,6 @@ function omitUndefined<T extends Record<string, unknown>>(value: T): T {
   ) as T;
 }
 
-export const __testFillProtected = {
-  resolveProtectedFieldPolicy,
+export const __testFillMemoryDelegated = {
+  resolveMemoryDelegatedFieldPolicy,
 };

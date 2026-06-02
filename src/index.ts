@@ -220,12 +220,19 @@ export type {
   MemoryApplyFillResult,
   MemoryBrowserFillWriter,
   MemoryCandidateHandle,
+  MemoryDelegatedFillArtifactReader,
+  MemoryDelegatedFillAssistiveBinding,
+  MemoryDelegatedFillAssistiveResolver,
+  MemoryDelegatedFillAssistiveResolutionInput,
+  MemoryDelegatedFillAssistiveResolutionResult,
   MemoryFillFieldState,
   MemoryFillPlan,
   MemoryObservedTarget,
   MemoryPlanBlocker,
   MemoryPlanField,
   MemoryDelegatedFillExecutionDescriptor,
+  MemoryDelegatedFillFieldWriter,
+  MemoryDelegatedFillTargetDescriptor,
   MemoryRedactionProfileInstaller,
   MemoryTargetMatch,
 } from './resolution/memory-fill-plan.js';
@@ -253,27 +260,9 @@ export {
   buildCdpHttpEndpointUrl,
 } from './transport/attach-endpoint.js';
 export { redactSensitiveText, redactSensitiveValue } from './redaction.js';
-export { buildProtectedExactValueProfile } from './redaction.js';
-export { match } from './resolution/match.js';
-export { matchOpenDataTargets } from './resolution/open-data-match.js';
+export { buildExactValueRedactionProfile } from './redaction.js';
 export {
-  matchProtectedFillSubjects,
-  matchProtectedFillSubjectsWithDiagnostics,
-  PROTECTED_FIELD_KEYS,
-} from './resolution/protected-fields.js';
-export { projectOpenDataValueForTarget } from './resolution/value-projection.js';
-export type {
-  MatchProtectedFillSubjectsDiagnostics,
-  MatchProtectedFillSubjectsOutput,
-  MatchProtectedFillSubjectsRejectedGroup,
-  MatchProtectedFillSubjectsRejectedGroupReason,
-} from './resolution/protected-fields.js';
-export {
-  buildSemanticMatchPrompt,
   MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA,
-  matchSemanticTargets,
-  openDataSemanticSchema,
-  protectedSemanticSchemas,
 } from './resolution/semantic-match.js';
 export type { AgentEvent } from './vendor/agent/event/types.js';
 export type {
@@ -289,6 +278,9 @@ export type {
   MagicBrowseActionTargetKind,
   MagicBrowseActivePageIdentity,
   MagicBrowseAttachOptions,
+  MagicBrowseBrowserDialogHandled,
+  MagicBrowseBrowserDialogSnapshot,
+  MagicBrowseBrowserDialogType,
   MagicBrowseClickOptions,
   MagicBrowseCloseOptions,
   MagicBrowseCloudProviderMetadata,
@@ -353,9 +345,8 @@ export type {
 } from './transport/run-store.js';
 export type {
   MagicBrowseMatchAmbiguousGroupResult,
-  MagicBrowseMatchAmbiguousResult,
-  MagicBrowseMatchFieldInput,
-  MagicBrowseMatchFieldResult,
+  MagicBrowseMatchApplicability,
+  MagicBrowseMatchExternalResolvePlan,
   MagicBrowseMatchGroupCandidate,
   MagicBrowseMatchGroupField,
   MagicBrowseMatchGroupInput,
@@ -365,84 +356,18 @@ export type {
   MagicBrowseMatchGroupSubject,
   MagicBrowseMatchInput,
   MagicBrowseMatchNeedsResolutionGroupResult,
-  MagicBrowseMatchNeedsResolutionResult,
   MagicBrowseMatchNoMatchGroupReason,
   MagicBrowseMatchNoMatchGroupResult,
-  MagicBrowseMatchNoMatchResult,
-  MagicBrowseProtectedBindingValueHint,
-  MagicBrowseProtectedFieldPolicies,
-  MagicBrowseProtectedFieldPolicy,
   MagicBrowseMatchReadyGroupResult,
-  MagicBrowseMatchReadyResult,
   MagicBrowseMatchResult,
   MagicBrowseMatchSubject,
 } from './resolution/match.js';
 export type {
-  MatchOpenDataTargetResult,
-  MatchOpenDataTargetsInput,
-  MatchOpenDataTargetsResult,
-  OpenDataCandidateApplicability,
-  OpenDataCandidateDescriptor,
-  OpenDataCandidateResolvePlan,
-  OpenDataCandidateSource,
-  OpenDataCandidateValue,
-  OpenDataCandidateValueType,
-  OpenDataTargetDescriptor,
-  OpenDataTargetMatcherModel,
-} from './resolution/open-data-match.js';
-export type {
-  OpenDataValueProjectionBlockedReason,
-  OpenDataValueProjectionHint,
-  OpenDataValueProjectionResult,
-  ProjectOpenDataValueForTargetInput,
-} from './resolution/value-projection.js';
-export type { MagicBrowseProtectedFieldKey } from './resolution/protected-fields.js';
-export type {
-  MagicBrowseProtectedArtifactReadInput,
-  MagicBrowseProtectedArtifactReadResult,
-  MagicBrowseProtectedArtifactReader,
-  MagicBrowseProtectedAssistiveBinding,
-  MagicBrowseProtectedAssistiveResolutionInput,
-  MagicBrowseProtectedAssistiveResolutionResult,
-  MagicBrowseProtectedAssistiveResolver,
-  MagicBrowseProtectedFillTargetDescriptor,
-  MagicBrowseProtectedFieldWriter,
-} from './resolution/fill-protected.js';
-export type {
-  MagicBrowseSemanticApplicability,
-  MagicBrowseSemanticCandidateDescriptor,
-  MagicBrowseSemanticCandidateSource,
-  MagicBrowseSemanticConfidence,
-  MagicBrowseSemanticFieldResult,
-  MagicBrowseSemanticGroupField,
-  MagicBrowseSemanticGroupResult,
-  MagicBrowseSemanticMatchInput,
-  MagicBrowseOpenDataValueHint,
-  MagicBrowseSemanticMatchPurpose,
-  MagicBrowseSemanticMatchResult,
   MagicBrowseSemanticMatcherModel,
   MagicBrowseSemanticMatcherRequest,
-  MagicBrowseSemanticNoMatchReason,
-  MagicBrowseSemanticPageContext,
-  MagicBrowseProtectedSemanticValueHint,
-  MagicBrowseSemanticRejectedGroup,
-  MagicBrowseSemanticRejectedGroupField,
-  MagicBrowseSemanticRejectedGroupFieldReason,
-  MagicBrowseSemanticRejectedGroupReason,
-  MagicBrowseSemanticSchemaDescriptor,
-  MagicBrowseSemanticSchemaFieldDescriptor,
-  MagicBrowseSemanticTargetDescriptor,
-  MagicBrowseSemanticValueHint,
-  MagicBrowseSemanticValueType,
 } from './resolution/semantic-match.js';
 export type {
-  ProtectedExactValueProfile,
-  ProtectedExactValueRule,
-  ProtectedRedactionProfiles,
+  ExactValueRedactionProfile,
+  ExactValueRedactionRule,
+  ExactValueRedactionProfiles,
 } from './redaction.js';
-export type {
-  OpenDataFieldResolutionPlan,
-  OpenDataFieldResolver,
-  OpenDataFieldResolverOutcome,
-  OpenDataResolverBlockedReason,
-} from './resolution/open-data-resolver.js';

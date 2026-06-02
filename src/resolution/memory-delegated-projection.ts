@@ -1,23 +1,23 @@
 import type {
   MagicBrowseMatchGroupField,
-  MagicBrowseProtectedBindingValueHint,
+  MagicBrowseMemoryBindingValueHint,
 } from './match.js';
 
-export type MagicBrowseProtectedDateProjectionErrorReason =
+export type MagicBrowseMemoryDelegatedDateProjectionErrorReason =
   | 'ambiguous_date_value'
   | 'incomplete_date_value'
   | 'invalid_date_value';
 
-export type MagicBrowseProtectedProjectionErrorReason =
-  | MagicBrowseProtectedDateProjectionErrorReason
-  | 'missing_protected_value'
+export type MagicBrowseMemoryDelegatedProjectionErrorReason =
+  | MagicBrowseMemoryDelegatedDateProjectionErrorReason
+  | 'missing_memory_value'
   | 'deterministic_only_resolution_failed'
   | 'unsupported_value_hint'
-  | 'unsupported_protected_field_group'
+  | 'unsupported_memory_field_group'
   | 'invalid_expiry_value'
   | 'target_missing';
 
-export type MagicBrowseProtectedDateProjectionResult =
+export type MagicBrowseMemoryDelegatedDateProjectionResult =
   | {
       readonly kind: 'normalized';
       readonly iso: string;
@@ -27,60 +27,60 @@ export type MagicBrowseProtectedDateProjectionResult =
     }
   | {
       readonly kind: 'error';
-      readonly reason: MagicBrowseProtectedDateProjectionErrorReason;
+      readonly reason: MagicBrowseMemoryDelegatedDateProjectionErrorReason;
     }
   | {
       readonly kind: 'not_date_like';
     };
 
-export type MagicBrowseProtectedProjectionResult =
+export type MagicBrowseMemoryDelegatedProjectionResult =
   | {
       readonly kind: 'value';
       readonly value: string;
     }
   | {
       readonly kind: 'error';
-      readonly reason: MagicBrowseProtectedProjectionErrorReason;
+      readonly reason: MagicBrowseMemoryDelegatedProjectionErrorReason;
     };
 
-export interface MagicBrowseProtectedProjectionTargetContext {
+export interface MagicBrowseMemoryDelegatedProjectionTargetContext {
   readonly hintText?: string;
 }
 
-export interface MagicBrowseProtectedProjectionTarget {
+export interface MagicBrowseMemoryDelegatedProjectionTarget {
   readonly targetRef: string;
   readonly label?: string;
   readonly displayLabel?: string;
-  readonly context?: MagicBrowseProtectedProjectionTargetContext;
+  readonly context?: MagicBrowseMemoryDelegatedProjectionTargetContext;
 }
 
-export interface ProjectProtectedBindingValueInput {
+export interface ProjectMemoryDelegatedBindingValueInput {
   readonly field: Pick<MagicBrowseMatchGroupField, 'fieldKey' | 'targetRef' | 'valueHint'>;
-  readonly protectedValues: Readonly<Record<string, string | undefined>>;
-  readonly target?: MagicBrowseProtectedProjectionTarget;
+  readonly memoryValues: Readonly<Record<string, string | undefined>>;
+  readonly target?: MagicBrowseMemoryDelegatedProjectionTarget;
 }
 
-export interface ProjectProtectedFillOperationsInput {
+export interface ProjectMemoryDelegatedFillOperationsInput {
   readonly fields: readonly MagicBrowseMatchGroupField[];
-  readonly targets: readonly MagicBrowseProtectedProjectionTarget[];
-  readonly protectedValues: Readonly<Record<string, string | undefined>>;
+  readonly targets: readonly MagicBrowseMemoryDelegatedProjectionTarget[];
+  readonly memoryValues: Readonly<Record<string, string | undefined>>;
 }
 
-export interface MagicBrowseProtectedProjectionOperation {
+export interface MagicBrowseMemoryDelegatedProjectionOperation {
   readonly targetRef: string;
-  readonly target: MagicBrowseProtectedProjectionTarget;
+  readonly target: MagicBrowseMemoryDelegatedProjectionTarget;
   readonly value: string;
   readonly fields: readonly MagicBrowseMatchGroupField[];
 }
 
-export type ProjectProtectedFillOperationsResult =
+export type ProjectMemoryDelegatedFillOperationsResult =
   | {
       readonly status: 'ready';
-      readonly operations: readonly MagicBrowseProtectedProjectionOperation[];
+      readonly operations: readonly MagicBrowseMemoryDelegatedProjectionOperation[];
     }
   | {
       readonly status: 'blocked';
-      readonly reason: MagicBrowseProtectedProjectionErrorReason;
+      readonly reason: MagicBrowseMemoryDelegatedProjectionErrorReason;
       readonly targetRef?: string;
       readonly fieldKey?: string;
     };
@@ -104,7 +104,7 @@ const MONTH_NAMES = [
   'December',
 ] as const;
 
-export function normalizeProtectedDateValue(value: string): MagicBrowseProtectedDateProjectionResult {
+export function normalizeMemoryDelegatedDateValue(value: string): MagicBrowseMemoryDelegatedDateProjectionResult {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
     return {
@@ -190,17 +190,17 @@ export function normalizeProtectedDateValue(value: string): MagicBrowseProtected
   };
 }
 
-export function projectProtectedBindingValue(
-  input: ProjectProtectedBindingValueInput
-): MagicBrowseProtectedProjectionResult {
+export function projectMemoryDelegatedBindingValue(
+  input: ProjectMemoryDelegatedBindingValueInput
+): MagicBrowseMemoryDelegatedProjectionResult {
   const valueHint = input.field.valueHint ?? 'direct';
 
   if (input.field.fieldKey === 'date_of_birth') {
-    return projectDateOfBirth(input.protectedValues.date_of_birth, valueHint, input.target);
+    return projectDateOfBirth(input.memoryValues.date_of_birth, valueHint, input.target);
   }
 
   if (input.field.fieldKey === 'full_name') {
-    return projectFullName(input.protectedValues.full_name, valueHint);
+    return projectFullName(input.memoryValues.full_name, valueHint);
   }
 
   if (valueHint !== 'direct') {
@@ -210,7 +210,7 @@ export function projectProtectedBindingValue(
     };
   }
 
-  const value = directProtectedValue(input.protectedValues, input.field.fieldKey);
+  const value = directMemoryValue(input.memoryValues, input.field.fieldKey);
   return value
     ? {
         kind: 'value',
@@ -218,16 +218,16 @@ export function projectProtectedBindingValue(
       }
     : {
         kind: 'error',
-        reason: 'missing_protected_value',
+        reason: 'missing_memory_value',
       };
 }
 
-export function projectProtectedFillOperations(
-  input: ProjectProtectedFillOperationsInput
-): ProjectProtectedFillOperationsResult {
+export function projectMemoryDelegatedFillOperations(
+  input: ProjectMemoryDelegatedFillOperationsInput
+): ProjectMemoryDelegatedFillOperationsResult {
   const targetByRef = new Map(input.targets.map((target) => [target.targetRef, target]));
   const groupedFields = groupFieldsByTarget(input.fields);
-  const operations: Array<MagicBrowseProtectedProjectionOperation & { readonly order: number }> = [];
+  const operations: Array<MagicBrowseMemoryDelegatedProjectionOperation & { readonly order: number }> = [];
 
   for (const group of groupedFields) {
     const target = targetByRef.get(group.targetRef);
@@ -240,7 +240,7 @@ export function projectProtectedFillOperations(
       };
     }
 
-    const cardExpiry = projectCardExpiry(group.fields, input.protectedValues);
+    const cardExpiry = projectCardExpiry(group.fields, input.memoryValues);
     if (cardExpiry.status === 'ready') {
       operations.push({
         targetRef: group.targetRef,
@@ -263,16 +263,16 @@ export function projectProtectedFillOperations(
     if (group.fields.length !== 1) {
       return {
         status: 'blocked',
-        reason: 'unsupported_protected_field_group',
+        reason: 'unsupported_memory_field_group',
         targetRef: group.targetRef,
         fieldKey: group.fields[0]?.fieldKey,
       };
     }
 
     const field = group.fields[0]!;
-    const projection = projectProtectedBindingValue({
+    const projection = projectMemoryDelegatedBindingValue({
       field,
-      protectedValues: input.protectedValues,
+      memoryValues: input.memoryValues,
       target,
     });
     if (projection.kind === 'error') {
@@ -303,17 +303,17 @@ export function projectProtectedFillOperations(
 
 function projectDateOfBirth(
   value: string | undefined,
-  valueHint: MagicBrowseProtectedBindingValueHint,
-  target: MagicBrowseProtectedProjectionTarget | undefined
-): MagicBrowseProtectedProjectionResult {
+  valueHint: MagicBrowseMemoryBindingValueHint,
+  target: MagicBrowseMemoryDelegatedProjectionTarget | undefined
+): MagicBrowseMemoryDelegatedProjectionResult {
   if (!value || value.trim().length === 0) {
     return {
       kind: 'error',
-      reason: 'missing_protected_value',
+      reason: 'missing_memory_value',
     };
   }
 
-  const normalized = normalizeProtectedDateValue(value);
+  const normalized = normalizeMemoryDelegatedDateValue(value);
   if (normalized.kind === 'error') {
     return normalized;
   }
@@ -357,13 +357,13 @@ function projectDateOfBirth(
 
 function projectFullName(
   value: string | undefined,
-  valueHint: MagicBrowseProtectedBindingValueHint
-): MagicBrowseProtectedProjectionResult {
+  valueHint: MagicBrowseMemoryBindingValueHint
+): MagicBrowseMemoryDelegatedProjectionResult {
   const fullName = normalizeWhitespace(value ?? '');
   if (fullName.length === 0) {
     return {
       kind: 'error',
-      reason: 'missing_protected_value',
+      reason: 'missing_memory_value',
     };
   }
 
@@ -396,7 +396,7 @@ function projectFullName(
 
 function projectCardExpiry(
   fields: readonly MagicBrowseMatchGroupField[],
-  protectedValues: Readonly<Record<string, string | undefined>>
+  memoryValues: Readonly<Record<string, string | undefined>>
 ):
   | {
       readonly status: 'ready';
@@ -404,7 +404,7 @@ function projectCardExpiry(
     }
   | {
       readonly status: 'blocked';
-      readonly reason: MagicBrowseProtectedProjectionErrorReason;
+      readonly reason: MagicBrowseMemoryDelegatedProjectionErrorReason;
       readonly fieldKey?: string;
     }
   | {
@@ -431,19 +431,19 @@ function projectCardExpiry(
     };
   }
 
-  const month = directProtectedValue(protectedValues, 'exp_month');
-  const year = directProtectedValue(protectedValues, 'exp_year');
+  const month = directMemoryValue(memoryValues, 'exp_month');
+  const year = directMemoryValue(memoryValues, 'exp_year');
   if (!month) {
     return {
       status: 'blocked',
-      reason: 'missing_protected_value',
+      reason: 'missing_memory_value',
       fieldKey: 'exp_month',
     };
   }
   if (!year) {
     return {
       status: 'blocked',
-      reason: 'missing_protected_value',
+      reason: 'missing_memory_value',
       fieldKey: 'exp_year',
     };
   }
@@ -482,7 +482,7 @@ function buildNormalizedDateValue(
   year: number,
   month: number,
   day: number
-): MagicBrowseProtectedDateProjectionResult {
+): MagicBrowseMemoryDelegatedDateProjectionResult {
   if (
     !Number.isInteger(year) ||
     !Number.isInteger(month) ||
@@ -523,7 +523,7 @@ function buildNormalizedDateValue(
 
 function projectMonthValue(
   month: string,
-  target: MagicBrowseProtectedProjectionTarget | undefined
+  target: MagicBrowseMemoryDelegatedProjectionTarget | undefined
 ): string {
   const style = monthProjectionStyle(target);
   if (style === 'name') {
@@ -536,7 +536,7 @@ function projectMonthValue(
 }
 
 function monthProjectionStyle(
-  target: MagicBrowseProtectedProjectionTarget | undefined
+  target: MagicBrowseMemoryDelegatedProjectionTarget | undefined
 ): 'name' | 'short' | 'numeric' {
   const context = [target?.label, target?.displayLabel, target?.context?.hintText]
     .filter((value): value is string => typeof value === 'string' && value.length > 0)
@@ -564,11 +564,11 @@ function monthProjectionStyle(
   return 'numeric';
 }
 
-function directProtectedValue(
-  protectedValues: Readonly<Record<string, string | undefined>>,
+function directMemoryValue(
+  memoryValues: Readonly<Record<string, string | undefined>>,
   fieldKey: string
 ): string | undefined {
-  const value = protectedValues[fieldKey];
+  const value = memoryValues[fieldKey];
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
@@ -610,11 +610,11 @@ function groupFieldsByTarget(
 }
 
 function projectionOrder(fields: readonly MagicBrowseMatchGroupField[], ordinal: number): number {
-  const fieldOrder = Math.min(...fields.map((field) => protectedFieldOrder(field.fieldKey)));
+  const fieldOrder = Math.min(...fields.map((field) => MemoryDelegatedFieldOrder(field.fieldKey)));
   return fieldOrder * 1000 + ordinal;
 }
 
-function protectedFieldOrder(fieldKey: string): number {
+function MemoryDelegatedFieldOrder(fieldKey: string): number {
   switch (fieldKey) {
     case 'username':
       return 10;

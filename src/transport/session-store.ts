@@ -12,9 +12,9 @@ import type {
   MagicBrowseViewport,
 } from '../types.js';
 import {
-  mergeProtectedRedactionProfiles,
-  normalizeProtectedRedactionProfiles,
-  type ProtectedRedactionProfiles,
+  mergeExactValueRedactionProfiles,
+  normalizeExactValueRedactionProfiles,
+  type ExactValueRedactionProfiles,
 } from '../redaction.js';
 import { parseBrowserInstanceRef } from './attach-endpoint.js';
 
@@ -47,7 +47,7 @@ export interface PersistedMagicBrowseSession {
   readonly userAgent?: string;
   readonly proxy?: MagicBrowseProxyConfig;
   readonly stealth?: boolean;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference;
 }
 
@@ -132,7 +132,7 @@ export function createPersistedMagicBrowseSession(input: {
   readonly userAgent?: string;
   readonly proxy?: MagicBrowseProxyConfig;
   readonly stealth?: boolean;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference;
   readonly now?: string;
 }): PersistedMagicBrowseSession {
@@ -164,8 +164,8 @@ export function createPersistedMagicBrowseSession(input: {
     ...(input.userAgent ? { userAgent: input.userAgent } : {}),
     ...(input.proxy ? { proxy: input.proxy } : {}),
     ...(typeof input.stealth === 'boolean' ? { stealth: input.stealth } : {}),
-    ...(input.protectedRedactionProfiles
-      ? { protectedRedactionProfiles: input.protectedRedactionProfiles }
+    ...(input.redactionProfiles
+      ? { redactionProfiles: input.redactionProfiles }
       : {}),
     ...(localCdpConnectPreference ? { localCdpConnectPreference } : {}),
   };
@@ -177,7 +177,7 @@ export function touchPersistedMagicBrowseSession(
     readonly activePageIdentity?: MagicBrowseActivePageIdentity;
     readonly runId?: string;
     readonly humanVerificationResolved?: MagicBrowseHumanVerificationResolvedMarker | null;
-    readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+    readonly redactionProfiles?: ExactValueRedactionProfiles;
     readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference | null;
     readonly now?: string;
   } = {}
@@ -191,11 +191,11 @@ export function touchPersistedMagicBrowseSession(
     updatedAt: input.now ?? new Date().toISOString(),
     ...(input.runId ? { runId: input.runId } : {}),
     ...(activePageIdentity ? { activePageIdentity } : {}),
-    ...(input.protectedRedactionProfiles
+    ...(input.redactionProfiles
       ? {
-          protectedRedactionProfiles: mergeProtectedRedactionProfiles(
-            session.protectedRedactionProfiles,
-            input.protectedRedactionProfiles
+          redactionProfiles: mergeExactValueRedactionProfiles(
+            session.redactionProfiles,
+            input.redactionProfiles
           ),
         }
       : {}),
@@ -250,8 +250,8 @@ export function normalizePersistedMagicBrowseSession(value: unknown): PersistedM
   const viewport = normalizeViewport(value.viewport);
   const userAgent = readString(value.userAgent);
   const proxy = normalizeProxyConfig(value.proxy);
-  const protectedRedactionProfiles = normalizeProtectedRedactionProfiles(
-    value.protectedRedactionProfiles
+  const redactionProfiles = normalizeExactValueRedactionProfiles(
+    value.redactionProfiles ?? value.protectedRedactionProfiles
   );
   const localCdpConnectPreference = normalizeLocalCdpConnectPreference(
     value.localCdpConnectPreference
@@ -293,7 +293,7 @@ export function normalizePersistedMagicBrowseSession(value: unknown): PersistedM
     ...(userAgent ? { userAgent } : {}),
     ...(proxy ? { proxy } : {}),
     ...(typeof value.stealth === 'boolean' ? { stealth: value.stealth } : {}),
-    ...(protectedRedactionProfiles ? { protectedRedactionProfiles } : {}),
+    ...(redactionProfiles ? { redactionProfiles } : {}),
     ...(localCdpConnectPreference ? { localCdpConnectPreference } : {}),
   };
 }

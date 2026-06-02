@@ -21,22 +21,22 @@ const SENSITIVE_KEY_PARTS = new Set([
 
 type TextReplacement = string | ((match: string, ...args: string[]) => string);
 
-export interface ProtectedExactValueRule {
+export interface ExactValueRedactionRule {
   readonly kind: 'exact' | 'digits';
   readonly digest: string;
   readonly length: number;
 }
 
-export interface ProtectedExactValueProfile {
+export interface ExactValueRedactionProfile {
   readonly version: 1;
   readonly algorithm: 'sha256';
-  readonly rules: Record<string, ProtectedExactValueRule>;
+  readonly rules: Record<string, ExactValueRedactionRule>;
 }
 
-export type ProtectedRedactionProfiles = Record<string, ProtectedExactValueProfile>;
+export type ExactValueRedactionProfiles = Record<string, ExactValueRedactionProfile>;
 
 export interface RedactSensitiveOptions {
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
 }
 
 const INLINE_REDACTIONS: ReadonlyArray<[RegExp, TextReplacement]> = [
@@ -70,7 +70,7 @@ export function redactSensitiveText(value: string, options: RedactSensitiveOptio
         ? current.replace(pattern, replacement)
         : current.replace(pattern, replacement as Parameters<string['replace']>[1]);
   }
-  return redactProtectedExactText(current, options.protectedRedactionProfiles);
+  return redactExactValueText(current, options.redactionProfiles);
 }
 
 export function redactSensitiveValue(
@@ -84,9 +84,9 @@ export function redactTransientImageDataUrls(value: string): string {
   return value.replace(TRANSIENT_IMAGE_DATA_URL_PATTERN, REDACTED_IMAGE_DATA_URL);
 }
 
-export function buildProtectedExactValueProfile(
+export function buildExactValueRedactionProfile(
   values: Readonly<Record<string, string | undefined>>
-): ProtectedExactValueProfile {
+): ExactValueRedactionProfile {
   const exactValues = new Set<string>();
   const digitValues = new Set<string>();
 
@@ -99,19 +99,19 @@ export function buildProtectedExactValueProfile(
   addPanDerivedValues(exactValues, digitValues, values.pan);
   addExpiryDerivedValues(exactValues, values.exp_month, values.exp_year);
 
-  const rules: Record<string, ProtectedExactValueRule> = {};
+  const rules: Record<string, ExactValueRedactionRule> = {};
   let index = 0;
   for (const value of exactValues) {
     rules[`exact-${index++}`] = {
       kind: 'exact',
-      digest: digestProtectedValue(value),
+      digest: digestRedactionValue(value),
       length: value.length,
     };
   }
   for (const value of digitValues) {
     rules[`digits-${index++}`] = {
       kind: 'digits',
-      digest: digestProtectedValue(value),
+      digest: digestRedactionValue(value),
       length: value.length,
     };
   }
@@ -123,16 +123,16 @@ export function buildProtectedExactValueProfile(
   };
 }
 
-export function normalizeProtectedRedactionProfiles(
+export function normalizeExactValueRedactionProfiles(
   value: unknown
-): ProtectedRedactionProfiles | undefined {
+): ExactValueRedactionProfiles | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
 
-  const profiles: ProtectedRedactionProfiles = {};
+  const profiles: ExactValueRedactionProfiles = {};
   for (const [profileRef, profile] of Object.entries(value)) {
-    const normalized = normalizeProtectedExactValueProfile(profile);
+    const normalized = normalizeExactValueRedactionProfile(profile);
     if (normalized) {
       profiles[profileRef] = normalized;
     }
@@ -141,10 +141,10 @@ export function normalizeProtectedRedactionProfiles(
   return Object.keys(profiles).length > 0 ? profiles : undefined;
 }
 
-export function mergeProtectedRedactionProfiles(
-  left: ProtectedRedactionProfiles | undefined,
-  right: ProtectedRedactionProfiles | undefined
-): ProtectedRedactionProfiles | undefined {
+export function mergeExactValueRedactionProfiles(
+  left: ExactValueRedactionProfiles | undefined,
+  right: ExactValueRedactionProfiles | undefined
+): ExactValueRedactionProfiles | undefined {
   if (!left && !right) {
     return undefined;
   }
@@ -203,17 +203,17 @@ function redactValue(
   return out;
 }
 
-function normalizeProtectedExactValueProfile(value: unknown): ProtectedExactValueProfile | undefined {
+function normalizeExactValueRedactionProfile(value: unknown): ExactValueRedactionProfile | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
 
-  const record = value as Partial<ProtectedExactValueProfile>;
+  const record = value as Partial<ExactValueRedactionProfile>;
   if (record.version !== 1 || record.algorithm !== 'sha256' || !isRecord(record.rules)) {
     return undefined;
   }
 
-  const rules: Record<string, ProtectedExactValueRule> = {};
+  const rules: Record<string, ExactValueRedactionRule> = {};
   for (const [ruleRef, rule] of Object.entries(record.rules)) {
     if (!isRecord(rule)) {
       continue;
@@ -243,9 +243,9 @@ function normalizeProtectedExactValueProfile(value: unknown): ProtectedExactValu
     : undefined;
 }
 
-function redactProtectedExactText(
+function redactExactValueText(
   value: string,
-  profiles: ProtectedRedactionProfiles | undefined
+  profiles: ExactValueRedactionProfiles | undefined
 ): string {
   const rules = profiles
     ? Object.values(profiles)
@@ -270,7 +270,7 @@ function redactProtectedExactText(
 
 function findExactDigestRanges(
   value: string,
-  rule: ProtectedExactValueRule
+  rule: ExactValueRedactionRule
 ): Array<{ readonly start: number; readonly end: number }> {
   if (rule.length > value.length) {
     return [];
@@ -279,7 +279,7 @@ function findExactDigestRanges(
   const ranges: Array<{ readonly start: number; readonly end: number }> = [];
   for (let index = 0; index <= value.length - rule.length; index += 1) {
     const candidate = value.slice(index, index + rule.length);
-    if (digestProtectedValue(candidate) === rule.digest) {
+    if (digestRedactionValue(candidate) === rule.digest) {
       ranges.push({ start: index, end: index + rule.length });
     }
   }
@@ -288,7 +288,7 @@ function findExactDigestRanges(
 
 function findDigitDigestRanges(
   value: string,
-  rule: ProtectedExactValueRule
+  rule: ExactValueRedactionRule
 ): Array<{ readonly start: number; readonly end: number }> {
   const ranges: Array<{ readonly start: number; readonly end: number }> = [];
   const digitRunPattern = /[\d\s./-]{4,}/g;
@@ -305,7 +305,7 @@ function findDigitDigestRanges(
     for (let index = 0; index <= digits.length - rule.length; index += 1) {
       const window = digits.slice(index, index + rule.length);
       const candidate = window.map(({ char }) => char).join('');
-      if (digestProtectedValue(candidate) !== rule.digest) {
+      if (digestRedactionValue(candidate) !== rule.digest) {
         continue;
       }
       const first = window[0]!;
@@ -447,7 +447,7 @@ function validIsoDate(year: number, month: number, day: number): string | undefi
   return `${String(year)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-function digestProtectedValue(value: string): string {
+function digestRedactionValue(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 

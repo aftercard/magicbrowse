@@ -31,13 +31,13 @@ const plannerCommonFields = {
   reasoning: z.string(),
 } as const;
 
-export const plannerProtectedFormHandoffSchema = z.object({
-  kind: z.literal('protected_form'),
+export const plannerMemoryFillHandoffSchema = z.object({
+  kind: z.literal('memory_fill'),
   resumeObjective: nonEmptyString,
 }).strict();
 
 export const plannerHandoffSchema = z.discriminatedUnion('kind', [
-  plannerProtectedFormHandoffSchema,
+  plannerMemoryFillHandoffSchema,
   z.object({ kind: z.literal('captcha') }).strict(),
   z.object({ kind: z.literal('auth') }).strict(),
   z.object({ kind: z.literal('identity_verification') }).strict(),
@@ -87,7 +87,7 @@ export const plannerOutputSchema = z.discriminatedUnion('status', [
 
 export type PlannerOutput = z.infer<typeof plannerOutputSchema>;
 export type PlannerStatus = PlannerOutput['status'];
-export type PlannerProtectedFormHandoff = z.infer<typeof plannerProtectedFormHandoffSchema>;
+export type PlannerMemoryFillHandoff = z.infer<typeof plannerMemoryFillHandoffSchema>;
 export type PlannerHandoff = z.infer<typeof plannerHandoffSchema>;
 export type PlannerBlockedReason = z.infer<typeof plannerBlockedReasonSchema>;
 
@@ -160,9 +160,9 @@ export class PlannerAgent extends BaseAgent<typeof plannerOutputSchema, PlannerO
                   next_steps: '',
                   final_answer: filterExternalContent(modelOutput.final_answer),
                   handoff:
-                    modelOutput.handoff.kind === 'protected_form'
+                    modelOutput.handoff.kind === 'memory_fill'
                       ? {
-                          kind: 'protected_form' as const,
+                          kind: 'memory_fill' as const,
                           resumeObjective: filterExternalContent(modelOutput.handoff.resumeObjective),
                         }
                       : {

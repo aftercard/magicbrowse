@@ -4,12 +4,12 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 import type { DebugSink } from '../adapter/debug.js';
 import {
-  mergeProtectedRedactionProfiles,
-  normalizeProtectedRedactionProfiles,
+  mergeExactValueRedactionProfiles,
+  normalizeExactValueRedactionProfiles,
   redactSensitiveText,
   redactSensitiveValue,
-  type ProtectedExactValueProfile,
-  type ProtectedRedactionProfiles,
+  type ExactValueRedactionProfile,
+  type ExactValueRedactionProfiles,
 } from '../redaction.js';
 import type {
   MagicBrowseActivePageIdentity,
@@ -61,7 +61,7 @@ export interface MagicBrowseRunRecord {
   readonly profile?: MagicBrowseProfileInfo;
   readonly instruction?: string;
   readonly activePageIdentity?: MagicBrowseActivePageIdentity;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly lastActStatus?: string;
   readonly lastFinalUrl?: string;
   readonly closedAt?: string;
@@ -83,7 +83,7 @@ export interface MagicBrowseSessionRunInput {
   readonly profile?: MagicBrowseProfileInfo;
   readonly instruction?: string;
   readonly activePageIdentity?: MagicBrowseActivePageIdentity;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly runId?: string;
 }
 
@@ -91,7 +91,7 @@ export interface MagicBrowseRunUpdateInput {
   readonly status?: MagicBrowseRunStatus;
   readonly instruction?: string;
   readonly activePageIdentity?: MagicBrowseActivePageIdentity;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly lastActStatus?: string;
   readonly lastFinalUrl?: string;
   readonly closedAt?: string;
@@ -159,8 +159,8 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
       ...(input.profile ? { profile: input.profile } : {}),
       ...(input.instruction ? { instruction: input.instruction } : {}),
       ...(input.activePageIdentity ? { activePageIdentity: input.activePageIdentity } : {}),
-      ...(input.protectedRedactionProfiles
-        ? { protectedRedactionProfiles: input.protectedRedactionProfiles }
+      ...(input.redactionProfiles
+        ? { redactionProfiles: input.redactionProfiles }
         : {}),
       events: [],
     };
@@ -261,12 +261,12 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
           level: input.level ?? 'info',
           ...(input.message
             ? {
-                message: redactRunText(input.message, record.protectedRedactionProfiles),
+                message: redactRunText(input.message, record.redactionProfiles),
               }
             : {}),
           ...(input.data !== undefined
             ? {
-                data: redactRunValue(input.data, record.protectedRedactionProfiles),
+                data: redactRunValue(input.data, record.redactionProfiles),
               }
             : {}),
           ...(input.actId ? { actId: input.actId } : {}),
@@ -285,41 +285,41 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
       await this.withFileLock(this.runPath(runId), async () => {
         const record = await this.requireRun(runId);
         const now = this.isoNow();
-        const protectedRedactionProfiles = input.protectedRedactionProfiles
-          ? mergeProtectedRedactionProfiles(
-              record.protectedRedactionProfiles,
-              input.protectedRedactionProfiles
+        const redactionProfiles = input.redactionProfiles
+          ? mergeExactValueRedactionProfiles(
+              record.redactionProfiles,
+              input.redactionProfiles
             )
-          : record.protectedRedactionProfiles;
-        const shouldScrubRecord = hasProtectedRedactionProfileChanges(
-          record.protectedRedactionProfiles,
-          input.protectedRedactionProfiles
+          : record.redactionProfiles;
+        const shouldScrubRecord = hasRedactionProfileChanges(
+          record.redactionProfiles,
+          input.redactionProfiles
         );
         const updatedRecord: MagicBrowseRunRecord = {
           ...record,
           updatedAt: now,
           ...(input.status ? { status: input.status } : {}),
           ...(input.instruction
-            ? { instruction: redactRunText(input.instruction, protectedRedactionProfiles) }
+            ? { instruction: redactRunText(input.instruction, redactionProfiles) }
             : {}),
           ...(input.activePageIdentity
             ? {
                 activePageIdentity: redactRunValue(
                   input.activePageIdentity,
-                  protectedRedactionProfiles
+                  redactionProfiles
                 ),
               }
             : {}),
-          ...(input.protectedRedactionProfiles
+          ...(input.redactionProfiles
             ? {
-                protectedRedactionProfiles,
+                redactionProfiles,
               }
             : {}),
           ...(input.lastActStatus
-            ? { lastActStatus: redactRunText(input.lastActStatus, protectedRedactionProfiles) }
+            ? { lastActStatus: redactRunText(input.lastActStatus, redactionProfiles) }
             : {}),
           ...(input.lastFinalUrl
-            ? { lastFinalUrl: redactRunText(input.lastFinalUrl, protectedRedactionProfiles) }
+            ? { lastFinalUrl: redactRunText(input.lastFinalUrl, redactionProfiles) }
             : {}),
           ...(input.closedAt ? { closedAt: input.closedAt } : {}),
         };
@@ -410,26 +410,26 @@ function emptyRunIndex(): MutableMagicBrowseRunIndex {
 }
 
 function redactRunRecord(record: MagicBrowseRunRecord): MagicBrowseRunRecord {
-  return redactRunValue(record, record.protectedRedactionProfiles);
+  return redactRunValue(record, record.redactionProfiles);
 }
 
 function redactRunText(
   value: string,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): string {
-  return redactSensitiveText(value, { protectedRedactionProfiles });
+  return redactSensitiveText(value, { redactionProfiles });
 }
 
 function redactRunValue<T>(
   value: T,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): T {
-  return redactSensitiveValue(value, { protectedRedactionProfiles }) as T;
+  return redactSensitiveValue(value, { redactionProfiles }) as T;
 }
 
-function hasProtectedRedactionProfileChanges(
-  currentProfiles: ProtectedRedactionProfiles | undefined,
-  incomingProfiles: ProtectedRedactionProfiles | undefined
+function hasRedactionProfileChanges(
+  currentProfiles: ExactValueRedactionProfiles | undefined,
+  incomingProfiles: ExactValueRedactionProfiles | undefined
 ): boolean {
   if (!incomingProfiles) {
     return false;
@@ -437,16 +437,16 @@ function hasProtectedRedactionProfileChanges(
 
   for (const [profileRef, incomingProfile] of Object.entries(incomingProfiles)) {
     const currentProfile = currentProfiles?.[profileRef];
-    if (!currentProfile || !protectedExactValueProfilesEqual(currentProfile, incomingProfile)) {
+    if (!currentProfile || !exactValueRedactionProfilesEqual(currentProfile, incomingProfile)) {
       return true;
     }
   }
   return false;
 }
 
-function protectedExactValueProfilesEqual(
-  left: ProtectedExactValueProfile,
-  right: ProtectedExactValueProfile
+function exactValueRedactionProfilesEqual(
+  left: ExactValueRedactionProfile,
+  right: ExactValueRedactionProfile
 ): boolean {
   if (left.version !== right.version || left.algorithm !== right.algorithm) {
     return false;
@@ -512,8 +512,8 @@ function normalizeRunRecord(value: unknown): MagicBrowseRunRecord | undefined {
   const createdAt = readString(value.createdAt);
   const updatedAt = readString(value.updatedAt);
   const events = Array.isArray(value.events) ? value.events.filter(isRunEvent) : [];
-  const protectedRedactionProfiles = normalizeProtectedRedactionProfiles(
-    value.protectedRedactionProfiles
+  const redactionProfiles = normalizeExactValueRedactionProfiles(
+    value.redactionProfiles ?? value.protectedRedactionProfiles
   );
 
   if (!id || !sessionId) {
@@ -540,7 +540,7 @@ function normalizeRunRecord(value: unknown): MagicBrowseRunRecord | undefined {
     ...(normalizeActivePageIdentity(value.activePageIdentity)
       ? { activePageIdentity: normalizeActivePageIdentity(value.activePageIdentity)! }
       : {}),
-    ...(protectedRedactionProfiles ? { protectedRedactionProfiles } : {}),
+    ...(redactionProfiles ? { redactionProfiles } : {}),
     ...(readString(value.lastActStatus) ? { lastActStatus: readString(value.lastActStatus)! } : {}),
     ...(readString(value.lastFinalUrl) ? { lastFinalUrl: readString(value.lastFinalUrl)! } : {}),
     ...(readString(value.closedAt) ? { closedAt: readString(value.closedAt)! } : {}),

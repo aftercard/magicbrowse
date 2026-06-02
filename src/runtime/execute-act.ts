@@ -17,10 +17,11 @@ import type {
 } from '../types.js';
 import { readPageIdentity } from '../transport/page-resolver.js';
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
+import { attachNativeBrowserDialogGuard } from './native-dialogs.js';
 import {
   redactSensitiveText,
   redactSensitiveValue,
-  type ProtectedRedactionProfiles,
+  type ExactValueRedactionProfiles,
 } from '../redaction.js';
 
 export interface ExecuteMagicBrowseActInput {
@@ -31,7 +32,7 @@ export interface ExecuteMagicBrowseActInput {
   readonly runRecorder?: MagicBrowseRunRecorder;
   readonly actId?: string;
   readonly initialAgentState?: ExecutorAgentState;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly trustedRuntimeEvidence?: readonly MagicBrowseTrustedRuntimeEvidence[];
 }
 
@@ -93,7 +94,7 @@ export async function executeMagicBrowseAct(
     },
     generalSettings,
     initialAgentState: input.initialAgentState,
-    browserStateTextProjector: createBrowserStateTextProjector(input.protectedRedactionProfiles),
+    browserStateTextProjector: createBrowserStateTextProjector(input.redactionProfiles),
     experimentalMemoryHints: actOpts.experimentalMemoryHints,
     trustedRuntimeEvidence: input.trustedRuntimeEvidence,
   });
@@ -102,8 +103,13 @@ export async function executeMagicBrowseAct(
     input.page,
     input.runRecorder,
     input.actId,
-    input.protectedRedactionProfiles
+    input.redactionProfiles
   );
+  const nativeDialog = attachNativeBrowserDialogGuard(input.page, {
+    runRecorder: input.runRecorder,
+    actId: input.actId,
+    redactionProfiles: input.redactionProfiles,
+  });
   const steps: MagicBrowseStepEvent[] = [];
   let finalStatus: MagicBrowseActStatus = 'failed';
   let finalMessage: string | undefined;
@@ -148,7 +154,7 @@ export async function executeMagicBrowseAct(
     };
     const safeProjected = redactMagicBrowseStepEventForOutput(
       rawProjected,
-      input.protectedRedactionProfiles
+      input.redactionProfiles
     );
     steps.push(safeProjected);
     if (isDebug()) {
@@ -170,20 +176,25 @@ export async function executeMagicBrowseAct(
         finalStatus = projectedStatus;
         finalMessage = redactFinalMessageForOutput(
           event.data.details,
-          input.protectedRedactionProfiles
+          input.redactionProfiles
         );
         finalHandoff = redactValueForOutput(
           event.data.handoff,
-          input.protectedRedactionProfiles
+          input.redactionProfiles
         );
         finalBlockedReason = event.data.blockedReason;
       }
     }
   });
 
+  let executeError: unknown;
   try {
     await executor.execute();
+  } catch (error) {
+    executeError = error;
   } finally {
+    await nativeDialog.settle();
+    nativeDialog.detach();
     executor.clearExecutionEvents();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     detachBrowserConsole();
@@ -191,6 +202,17 @@ export async function executeMagicBrowseAct(
     await input.runRecorder?.flush();
   }
 
+  const blockingDialog = nativeDialog.blockingDialog();
+  if (executeError && !blockingDialog) {
+    throw executeError;
+  }
+  if (blockingDialog) {
+    finalStatus = 'blocked';
+    finalBlockedReason = 'browser_dialog_open';
+    finalHandoff = undefined;
+    finalMessage = `Browser ${blockingDialog.type} dialog opened during act.`;
+  }
+  const handledDialog = nativeDialog.lastDialog();
   const finalPage = await ctx.getCurrentPuppeteerPage();
   const finalUrl = finalPage.url();
   const activePageIdentity = await readPageIdentity(finalPage);
@@ -204,6 +226,7 @@ export async function executeMagicBrowseAct(
       finalMessage,
       ...(finalHandoff ? { handoff: finalHandoff } : {}),
       ...(finalBlockedReason ? { blockedReason: finalBlockedReason } : {}),
+      ...(handledDialog ? { dialog: handledDialog } : {}),
     },
     activePageIdentity,
     agentState: executor.getAgentState(),
@@ -272,20 +295,20 @@ function resolveActLlms(options: MagicBrowseActOptions): {
 }
 
 function createBrowserStateTextProjector(
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): ((text: string) => string) | undefined {
-  if (!protectedRedactionProfiles) {
+  if (!redactionProfiles) {
     return undefined;
   }
 
-  return (text: string) => redactSensitiveText(text, { protectedRedactionProfiles });
+  return (text: string) => redactSensitiveText(text, { redactionProfiles });
 }
 
 function attachBrowserConsoleRecorder(
   page: PuppeteerPage,
   runRecorder: MagicBrowseRunRecorder | undefined,
   actId: string | undefined,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): () => void {
   if (!runRecorder) {
     return () => undefined;
@@ -298,7 +321,7 @@ function attachBrowserConsoleRecorder(
         text: message.text(),
         location: message.location(),
       },
-      protectedRedactionProfiles
+      redactionProfiles
     );
     void runRecorder.append({
       type: 'browser.console',
@@ -316,31 +339,31 @@ function attachBrowserConsoleRecorder(
 
 function redactMagicBrowseStepEventForOutput(
   event: MagicBrowseStepEvent,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): MagicBrowseStepEvent {
-  return redactValueForOutput(event, protectedRedactionProfiles);
+  return redactValueForOutput(event, redactionProfiles);
 }
 
 function redactFinalMessageForOutput(
   message: string,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): string {
-  if (!protectedRedactionProfiles) {
+  if (!redactionProfiles) {
     return message;
   }
 
-  return redactSensitiveText(message, { protectedRedactionProfiles });
+  return redactSensitiveText(message, { redactionProfiles });
 }
 
 function redactValueForOutput<T>(
   value: T,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): T {
-  if (!protectedRedactionProfiles) {
+  if (!redactionProfiles) {
     return value;
   }
 
-  return redactSensitiveValue(value, { protectedRedactionProfiles }) as T;
+  return redactSensitiveValue(value, { redactionProfiles }) as T;
 }
 
 function mapConsoleLevel(type: string): 'debug' | 'info' | 'warn' | 'error' {

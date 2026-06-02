@@ -3,6 +3,7 @@ import type {
   MagicBrowseDeterministicActionResult,
   MagicBrowseDeterministicActionVerb,
   MagicBrowseActionTargetDescriptor,
+  MagicBrowseBrowserDialogSnapshot,
   MagicBrowseFillableTargetDescriptor,
 } from '../types.js';
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
@@ -10,9 +11,13 @@ import type BrowserPage from '../vendor/browser/page.js';
 import type { DOMElementNode } from '../vendor/browser/dom/views.js';
 import type { BrowserState } from '../vendor/browser/views.js';
 import {
+  isBlockingNativeBrowserDialog,
+  type NativeBrowserDialogGuard,
+} from '../runtime/native-dialogs.js';
+import {
   actionDescriptorsMatch,
   createActionTargetDescriptor,
-  createResolveFieldTargetDescriptor,
+  createMemoryFieldTargetDescriptor,
   resolveSelectorMapElementForTarget,
 } from './targets.js';
 
@@ -38,6 +43,10 @@ interface DeterministicActionBaseInput {
   readonly sessionId?: string;
   readonly runRecorder?: MagicBrowseRunRecorder;
   readonly readPageIdentity?: () => Promise<Pick<PageIdentity, 'url' | 'title'>>;
+  readonly nativeDialog?: Pick<
+    NativeBrowserDialogGuard,
+    'lastDialog' | 'blockingDialog' | 'settle'
+  >;
 }
 
 export interface ExecuteMagicBrowseInputActionInput extends DeterministicActionBaseInput {
@@ -103,23 +112,44 @@ export async function executeMagicBrowseInputAction(
       inputTarget: inputResult?.inputTarget,
     });
     if (input.failOnClientValidation && inputResult?.clientValidation.invalid) {
+      const dialogBlock = await blockNativeDialogIfNeeded(input, input.action, {
+        targetRef: input.target.ref,
+        ...resolved.identity,
+      });
+      if (dialogBlock) {
+        return dialogBlock;
+      }
       return block(input, input.action, 'input_failed', {
         targetRef: input.target.ref,
         ...resolved.identity,
       });
     }
   } catch {
+    const dialogBlock = await blockNativeDialogIfNeeded(input, input.action, {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    });
+    if (dialogBlock) {
+      return dialogBlock;
+    }
     return block(input, input.action, 'input_failed', {
       targetRef: input.target.ref,
       ...resolved.identity,
     });
   }
 
+  const dialog = await readHandledNativeDialog(input);
+  if (isBlockingNativeBrowserDialog(dialog)) {
+    return block(input, input.action, 'browser_dialog_open', {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    }, dialog);
+  }
   return complete(input, input.action, {
     targetRef: input.target.ref,
     ...resolved.identity,
     ...(await readCurrentPageIdentity(input)),
-  });
+  }, dialog);
 }
 
 export async function executeMagicBrowseClickAction(
@@ -153,17 +183,31 @@ export async function executeMagicBrowseClickAction(
   try {
     await input.page.clickElementNode(false, resolved.element);
   } catch {
+    const dialogBlock = await blockNativeDialogIfNeeded(input, 'click', {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    });
+    if (dialogBlock) {
+      return dialogBlock;
+    }
     return block(input, 'click', 'click_failed', {
       targetRef: input.target.ref,
       ...resolved.identity,
     });
   }
 
+  const dialog = await readHandledNativeDialog(input);
+  if (isBlockingNativeBrowserDialog(dialog)) {
+    return block(input, 'click', 'browser_dialog_open', {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    }, dialog);
+  }
   return complete(input, 'click', {
     targetRef: input.target.ref,
     ...resolved.identity,
     ...(await readCurrentPageIdentity(input)),
-  });
+  }, dialog);
 }
 
 export async function executeMagicBrowseSelectAction(
@@ -209,17 +253,31 @@ export async function executeMagicBrowseSelectAction(
   try {
     await input.page.selectDropdownOption(input.target.selectorMapIndex, input.optionText);
   } catch {
+    const dialogBlock = await blockNativeDialogIfNeeded(input, 'select', {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    });
+    if (dialogBlock) {
+      return dialogBlock;
+    }
     return block(input, 'select', 'select_failed', {
       targetRef: input.target.ref,
       ...resolved.identity,
     });
   }
 
+  const dialog = await readHandledNativeDialog(input);
+  if (isBlockingNativeBrowserDialog(dialog)) {
+    return block(input, 'select', 'browser_dialog_open', {
+      targetRef: input.target.ref,
+      ...resolved.identity,
+    }, dialog);
+  }
   return complete(input, 'select', {
     targetRef: input.target.ref,
     ...resolved.identity,
     ...(await readCurrentPageIdentity(input)),
-  });
+  }, dialog);
 }
 
 export async function executeMagicBrowsePressAction(
@@ -233,10 +291,18 @@ export async function executeMagicBrowsePressAction(
   try {
     await input.page.sendKeys(input.keys);
   } catch {
+    const dialogBlock = await blockNativeDialogIfNeeded(input, 'press');
+    if (dialogBlock) {
+      return dialogBlock;
+    }
     return block(input, 'press', 'press_failed');
   }
 
-  return complete(input, 'press', await readCurrentPageIdentity(input));
+  const dialog = await readHandledNativeDialog(input);
+  if (isBlockingNativeBrowserDialog(dialog)) {
+    return block(input, 'press', 'browser_dialog_open', {}, dialog);
+  }
+  return complete(input, 'press', await readCurrentPageIdentity(input), dialog);
 }
 
 export async function validateMagicBrowseInputActionTarget(input: {
@@ -254,7 +320,7 @@ export async function validateMagicBrowseInputActionTarget(input: {
     };
   }
 
-  const current = createResolveFieldTargetDescriptor({
+  const current = createMemoryFieldTargetDescriptor({
     state,
     element,
     selectorMapIndex: input.target.selectorMapIndex,
@@ -302,6 +368,7 @@ export function buildMagicBrowseDeterministicActionBlockedResult(input: {
   readonly pageRef?: string;
   readonly url?: string;
   readonly title?: string;
+  readonly dialog?: MagicBrowseBrowserDialogSnapshot;
 }): MagicBrowseDeterministicActionResult {
   return buildResult({
     status: 'blocked',
@@ -311,6 +378,7 @@ export function buildMagicBrowseDeterministicActionBlockedResult(input: {
     pageRef: input.pageRef,
     url: input.url,
     title: input.title,
+    dialog: input.dialog,
   });
 }
 
@@ -378,12 +446,14 @@ function validateTextLikeInputTarget(
 async function complete(
   input: DeterministicActionBaseInput,
   action: MagicBrowseDeterministicActionVerb,
-  identity: PageIdentity & { readonly targetRef?: string } = {}
+  identity: PageIdentity & { readonly targetRef?: string } = {},
+  dialog?: MagicBrowseBrowserDialogSnapshot
 ): Promise<MagicBrowseDeterministicActionResult> {
   const result = buildResult({
     status: 'completed',
     action,
     ...identity,
+    dialog,
   });
   await appendDeterministicActionEvent(input, 'deterministic_action.complete', { ...result });
   return result;
@@ -393,12 +463,14 @@ async function block(
   input: DeterministicActionBaseInput,
   action: MagicBrowseDeterministicActionVerb,
   reason: MagicBrowseDeterministicActionBlockedReason,
-  identity: PageIdentity & { readonly targetRef?: string } = {}
+  identity: PageIdentity & { readonly targetRef?: string } = {},
+  dialog?: MagicBrowseBrowserDialogSnapshot
 ): Promise<MagicBrowseDeterministicActionResult> {
   const result = buildMagicBrowseDeterministicActionBlockedResult({
     action,
     reason,
     ...identity,
+    dialog,
   });
   await appendDeterministicActionEvent(input, 'deterministic_action.blocked', { ...result });
   return result;
@@ -412,6 +484,7 @@ function buildResult(input: {
   readonly pageRef?: string;
   readonly url?: string;
   readonly title?: string;
+  readonly dialog?: MagicBrowseBrowserDialogSnapshot;
 }): MagicBrowseDeterministicActionResult {
   return omitUndefined({
     status: input.status,
@@ -421,6 +494,7 @@ function buildResult(input: {
     url: input.url,
     title: input.title,
     reason: input.reason,
+    dialog: input.dialog,
     summary: deterministicActionSummary(input),
   });
 }
@@ -430,12 +504,14 @@ function deterministicActionSummary(input: {
   readonly action: MagicBrowseDeterministicActionVerb;
   readonly reason?: MagicBrowseDeterministicActionBlockedReason;
   readonly targetRef?: string;
+  readonly dialog?: MagicBrowseBrowserDialogSnapshot;
 }): string {
   const pieces = [
     `magicbrowse_action ${input.status}`,
     `action=${input.action}`,
     input.targetRef ? `target=${input.targetRef}` : undefined,
     input.reason ? `reason=${input.reason}` : undefined,
+    input.dialog ? `dialog=${input.dialog.type}:${input.dialog.handled}` : undefined,
   ].filter((piece): piece is string => piece !== undefined);
   return pieces.join(' ');
 }
@@ -458,10 +534,30 @@ async function appendDeterministicActionEvent(
       url: data.url,
       title: data.title,
       reason: data.reason,
+      dialog: data.dialog,
       inputTarget: data.inputTarget,
       summary: data.summary,
     }),
   });
+}
+
+async function readHandledNativeDialog(
+  input: DeterministicActionBaseInput
+): Promise<MagicBrowseBrowserDialogSnapshot | undefined> {
+  await input.nativeDialog?.settle();
+  return input.nativeDialog?.lastDialog();
+}
+
+async function blockNativeDialogIfNeeded(
+  input: DeterministicActionBaseInput,
+  action: MagicBrowseDeterministicActionVerb,
+  identity: PageIdentity & { readonly targetRef?: string } = {}
+): Promise<MagicBrowseDeterministicActionResult | undefined> {
+  const dialog = await readHandledNativeDialog(input);
+  if (!isBlockingNativeBrowserDialog(dialog)) {
+    return undefined;
+  }
+  return block(input, action, 'browser_dialog_open', identity, dialog);
 }
 
 async function readCurrentPageIdentity(input: DeterministicActionBaseInput): Promise<PageIdentity> {

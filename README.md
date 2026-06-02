@@ -31,7 +31,7 @@ Typical workflow:
 2. ask what is on the page with `observe(...)`, or delegate a bounded goal with
    `act(...)`;
 3. use deterministic verbs when you already know the target and value;
-4. stop at protected-data, approval, login, or human-verification edges and let
+4. stop at Memory fill, approval, login, or human-verification edges and let
    the owning application decide what happens next;
 5. close the session when the workflow is done.
 
@@ -232,7 +232,7 @@ logs, not for parsing.
 - `completed` - the delegated browser task completed.
 - `blocked` - the task cannot continue without missing input, a different
   strategy, or a page state change.
-- `needs_handoff` - the task reached protected data, login/OTP, payment,
+- `needs_handoff` - the task reached Memory-managed data, login/OTP, payment,
   identity/KYC data, CAPTCHA, or human verification.
 - `needs_approval` - the next useful action would commit a consequential
   external side effect and needs explicit approval.
@@ -240,29 +240,23 @@ logs, not for parsing.
 - `max_steps` - the step budget ended before a terminal decision.
 - `cancelled` - caller or user cancellation.
 
-For protected forms, `needs_handoff` may include
-`handoff: { kind: 'protected_form', resumeObjective }`. After the approved
-protected-data owner completes the fill, call `act(...)` again with that narrow
-`resumeObjective` to continue.
+For Memory fill boundaries, `needs_handoff` may include
+`handoff: { kind: 'memory_fill', resumeObjective }`. After MagicPay completes
+the Memory `plan-fill` / `apply-fill` workflow, call `act(...)` again with that
+narrow `resumeObjective` to continue.
 
-## Open Data And Protected Data
+## Memory Fill
 
-MagicBrowse keeps ordinary open-data and protected-data orchestration outside
-the public root API. Host applications should observe the page, decide which
-data is available, and then call deterministic browser verbs such as `fill(...)`
-and `select(...)` with explicit values.
-
-Open data is information the user has already provided clearly for the current
-task, such as a city, travel date, quantity, or public profile detail.
-
-Protected data is sensitive information such as passwords, OTPs, payment card
-data, identity documents, bank details, API keys, private keys, and secrets. The
-LLM is not asked to invent or handle those values.
+MagicBrowse keeps Memory orchestration outside the public root API. Host
+applications should observe the page, plan through MagicPay Memory, apply the
+approved fill, and then resume MagicBrowse with deterministic browser verbs
+such as `fill(...)` and `select(...)` only when explicit values are already in
+the host application's runtime boundary.
 
 Core rules:
 
-- Protected values are not sent to the planner or navigator.
-- Observe output and run records are redacted after protected fills.
+- Raw Memory values are not sent to the planner or navigator.
+- Observe output and run records are redacted after Memory fills.
 - Login, identity, checkout, payment, CAPTCHA, and human-verification edges
   stop as `needs_handoff` unless the caller uses the dedicated guarded path.
 - Consequential external actions should go through the caller's approval flow

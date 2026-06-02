@@ -1,7 +1,7 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { ExecutionEventKind } from './vendor/agent/event/types.js';
 import type { MagicBrowseLlmAdapter } from './llm/types.js';
-import type { ProtectedRedactionProfiles } from './redaction.js';
+import type { ExactValueRedactionProfiles } from './redaction.js';
 
 export interface MagicBrowseViewport {
   readonly width: number;
@@ -174,11 +174,27 @@ export type MagicBrowseActBlockedReason =
   | 'missing_input'
   | 'item_unavailable'
   | 'ambiguous'
-  | 'no_path';
+  | 'no_path'
+  | 'browser_dialog_open';
+
+export type MagicBrowseBrowserDialogType =
+  | 'alert'
+  | 'confirm'
+  | 'prompt'
+  | 'beforeunload'
+  | 'unknown';
+
+export type MagicBrowseBrowserDialogHandled = 'accepted' | 'dismissed' | 'failed';
+
+export interface MagicBrowseBrowserDialogSnapshot {
+  readonly type: MagicBrowseBrowserDialogType;
+  readonly message?: string;
+  readonly handled: MagicBrowseBrowserDialogHandled;
+}
 
 export type MagicBrowseActHandoff =
   | {
-      readonly kind: 'protected_form';
+      readonly kind: 'memory_fill';
       readonly resumeObjective: string;
     }
   | {
@@ -211,6 +227,7 @@ export interface MagicBrowseActResult {
   readonly finalMessage?: string;
   readonly handoff?: MagicBrowseActHandoff;
   readonly blockedReason?: MagicBrowseActBlockedReason;
+  readonly dialog?: MagicBrowseBrowserDialogSnapshot;
 }
 
 export type MagicBrowseScreenshotResult =
@@ -333,7 +350,8 @@ export type MagicBrowseSubmitFormTargetBlockedReason =
   | 'stale_target'
   | 'not_submit_target'
   | 'target_disabled'
-  | 'click_failed';
+  | 'click_failed'
+  | 'browser_dialog_open';
 
 export interface MagicBrowseSubmitFormTargetOptions {
   readonly sessionId?: string;
@@ -347,6 +365,7 @@ export type MagicBrowseSubmitFormTargetResult =
       readonly pageRef?: string;
       readonly url?: string;
       readonly title?: string;
+      readonly dialog?: MagicBrowseBrowserDialogSnapshot;
       readonly summary: string;
     }
   | {
@@ -356,6 +375,7 @@ export type MagicBrowseSubmitFormTargetResult =
       readonly pageRef?: string;
       readonly url?: string;
       readonly title?: string;
+      readonly dialog?: MagicBrowseBrowserDialogSnapshot;
       readonly summary: string;
     };
 
@@ -373,7 +393,8 @@ export type MagicBrowseDeterministicActionBlockedReason =
   | 'click_failed'
   | 'input_failed'
   | 'select_failed'
-  | 'press_failed';
+  | 'press_failed'
+  | 'browser_dialog_open';
 
 export interface MagicBrowseDeterministicActionResult {
   readonly status: MagicBrowseDeterministicActionStatus;
@@ -383,6 +404,7 @@ export interface MagicBrowseDeterministicActionResult {
   readonly url?: string;
   readonly title?: string;
   readonly reason?: MagicBrowseDeterministicActionBlockedReason;
+  readonly dialog?: MagicBrowseBrowserDialogSnapshot;
   readonly summary: string;
 }
 
@@ -450,7 +472,7 @@ export interface MagicBrowseManagedSession {
   readonly profile?: MagicBrowseProfileInfo;
   readonly activePageIdentity?: MagicBrowseActivePageIdentity;
   readonly humanVerificationResolved?: MagicBrowseHumanVerificationResolvedMarker;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
   observe(opts?: MagicBrowseObserveOptions): Promise<MagicBrowseObserveResult>;
   act(opts: MagicBrowseActOptions): Promise<MagicBrowseActResult>;
   markCaptchaResolved(

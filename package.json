@@ -1,6 +1,6 @@
 {
   "name": "@aftercard-ai/magicbrowse",
-  "version": "0.0.15",
+  "version": "0.0.16",
   "type": "module",
   "description": "LLM-first browser-automation runtime: planner + navigator agents driving Chrome over CDP",
   "license": "MIT AND Apache-2.0",

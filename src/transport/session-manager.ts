@@ -36,33 +36,20 @@ import type {
 import { DEFAULT_GENERAL_SETTINGS } from '../adapter/storage-stubs.js';
 import { redactSensitiveValue } from '../redaction.js';
 import {
-  fillOpenDataTarget as executeFillOpenDataTarget,
-  type FillOpenDataTargetInput,
-  type FillOpenDataTargetResult,
-} from '../resolution/fill-open-data.js';
-import {
-  fillProtectedGroup as executeFillProtectedGroup,
-  type MagicBrowseProtectedFillTargetDescriptor,
-  type MagicBrowseProtectedFieldWriter,
-  type FillProtectedGroupInput,
-  type FillProtectedGroupResult,
-} from '../resolution/fill-protected.js';
-import {
   buildMagicBrowseDeterministicActionBlockedResult,
   executeMagicBrowseClickAction,
   executeMagicBrowseInputAction,
   executeMagicBrowsePressAction,
   executeMagicBrowseSelectAction,
 } from '../resolution/deterministic-actions.js';
-import type { MagicBrowseMatchGroupCandidate, MagicBrowseMatchReadyGroupResult } from '../resolution/match.js';
-import {
-  buildResolveFieldTargetDescriptors,
-  type BrowserStateResolveFieldTargetDescriptor,
-} from '../resolution/targets.js';
 import { submitFormTarget as executeSubmitFormTarget } from '../resolution/submit-target.js';
 import { executeMagicBrowseAct } from '../runtime/execute-act.js';
+import {
+  attachNativeBrowserDialogGuard,
+  type NativeBrowserDialogGuard,
+} from '../runtime/native-dialogs.js';
 import { executeMagicBrowseObserve } from '../runtime/execute-observe.js';
-import BrowserPage, { DropdownOptionValueNotFoundError } from '../vendor/browser/page.js';
+import BrowserPage from '../vendor/browser/page.js';
 import {
   createFileAgentSessionStateStore,
   type AgentSessionStateStore,
@@ -670,7 +657,7 @@ export class MagicBrowseSessionManager {
         runRecorder,
         actId,
         initialAgentState: loadedAgentState.state,
-        protectedRedactionProfiles: session.protectedRedactionProfiles,
+        redactionProfiles: session.redactionProfiles,
         trustedRuntimeEvidence: markerResolution.evidence
           ? [markerResolution.evidence]
           : undefined,
@@ -696,6 +683,8 @@ export class MagicBrowseSessionManager {
           finalUrl: executed.result.finalUrl,
           finalMessage: executed.result.finalMessage,
           handoff: executed.result.handoff,
+          blockedReason: executed.result.blockedReason,
+          dialog: executed.result.dialog,
           stepCount: executed.result.steps.length,
           activePageIdentity: executed.activePageIdentity,
         },
@@ -781,7 +770,7 @@ export class MagicBrowseSessionManager {
           : {}),
         runRecorder,
         observeId,
-        protectedRedactionProfiles: session.protectedRedactionProfiles,
+        redactionProfiles: session.redactionProfiles,
       });
       const updatedSession = touchPersistedMagicBrowseSession(session, {
         runId: runRecorder.runId,
@@ -826,75 +815,20 @@ export class MagicBrowseSessionManager {
     }
   }
 
-  async fillOpenDataTarget(options: FillOpenDataTargetInput): Promise<FillOpenDataTargetResult> {
-    const session = await this.requireCurrentSession('fillOpenDataTarget', options.sessionId);
-    const runRecorder = await this.ensureSessionRun(session);
-    let browser: Browser | undefined;
-
-    try {
-      browser = await this.connect(session, { runRecorder }).catch((error: unknown) => {
-        throw createDeadSessionError(error);
-      });
-      const page = await resolveActivePage({
-        browser,
-        activePageIdentity: session.activePageIdentity,
-      });
-      await authenticateProxyIfNeeded(page, session.proxy);
-      const browserPage = new BrowserPage(page, {
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
-      });
-      const { runRecorder: _callerRecorder, ...fillInput } = options;
-      const result = await executeFillOpenDataTarget({
-        ...fillInput,
-        sessionId: session.id,
-        page: browserPage,
-        runRecorder,
-      });
-      const updatedSession = touchPersistedMagicBrowseSession(session, {
-        runId: runRecorder.runId,
-        activePageIdentity: await readPageIdentity(page),
-      });
-      await this.store.saveCurrentSession(updatedSession);
-      await runRecorder.update({
-        activePageIdentity: updatedSession.activePageIdentity,
-      });
-      return result;
-    } catch (error) {
-      await runRecorder.append({
-        type: 'open_data_fill.error',
-        level: 'error',
-        message: 'Open-data field fill failed before completion.',
-        data: {
-          sessionId: session.id,
-          runId: runRecorder.runId,
-          targetRef: options.target.ref,
-          status: 'blocked',
-          reason: 'fill_failed',
-        },
-      });
-      throw error;
-    } finally {
-      if (browser) {
-        await disconnectBrowser(browser);
-      }
-      await runRecorder.flush();
-    }
-  }
-
   async click(options: MagicBrowseClickOptions): Promise<MagicBrowseDeterministicActionResult> {
     return this.executeDeterministicCurrentSession({
       action: 'click',
       sessionId: options.sessionId,
       targetRef: options.target.ref,
       failureReason: 'click_failed',
-      run: ({ browserPage, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowseClickAction({
           sessionId: session.id,
           target: options.target,
           page: browserPage,
           runRecorder,
           readPageIdentity: async () => readPageIdentity(page),
+          nativeDialog,
         }),
     });
   }
@@ -905,7 +839,7 @@ export class MagicBrowseSessionManager {
       sessionId: options.sessionId,
       targetRef: options.target.ref,
       failureReason: 'input_failed',
-      run: ({ browserPage, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowseInputAction({
           action: 'type',
           sessionId: session.id,
@@ -914,6 +848,7 @@ export class MagicBrowseSessionManager {
           page: browserPage,
           runRecorder,
           readPageIdentity: async () => readPageIdentity(page),
+          nativeDialog,
         }),
     });
   }
@@ -924,7 +859,7 @@ export class MagicBrowseSessionManager {
       sessionId: options.sessionId,
       targetRef: options.target.ref,
       failureReason: 'input_failed',
-      run: ({ browserPage, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowseInputAction({
           action: 'fill',
           sessionId: session.id,
@@ -933,6 +868,7 @@ export class MagicBrowseSessionManager {
           page: browserPage,
           runRecorder,
           readPageIdentity: async () => readPageIdentity(page),
+          nativeDialog,
         }),
     });
   }
@@ -943,7 +879,7 @@ export class MagicBrowseSessionManager {
       sessionId: options.sessionId,
       targetRef: options.target.ref,
       failureReason: 'select_failed',
-      run: ({ browserPage, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowseSelectAction({
           sessionId: session.id,
           target: options.target,
@@ -951,6 +887,7 @@ export class MagicBrowseSessionManager {
           page: browserPage,
           runRecorder,
           readPageIdentity: async () => readPageIdentity(page),
+          nativeDialog,
         }),
     });
   }
@@ -960,102 +897,16 @@ export class MagicBrowseSessionManager {
       action: 'press',
       sessionId: options.sessionId,
       failureReason: 'press_failed',
-      run: ({ browserPage, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowsePressAction({
           sessionId: session.id,
           keys: options.keys,
           page: browserPage,
           runRecorder,
           readPageIdentity: async () => readPageIdentity(page),
+          nativeDialog,
         }),
     });
-  }
-
-  async fillProtectedGroup(options: FillProtectedGroupInput): Promise<FillProtectedGroupResult> {
-    const session = await this.requireCurrentSession('fillProtectedGroup', options.sessionId);
-    const runRecorder = await this.ensureSessionRun(session);
-    let browser: Browser | undefined;
-    const collectedProfiles: NonNullable<PersistedMagicBrowseSession['protectedRedactionProfiles']> = {};
-
-    try {
-      browser = await this.connect(session, { runRecorder }).catch((error: unknown) => {
-        throw createDeadSessionError(error);
-      });
-      const page = await resolveActivePage({
-        browser,
-        activePageIdentity: session.activePageIdentity,
-      });
-      await authenticateProxyIfNeeded(page, session.proxy);
-      const browserPage = new BrowserPage(page, {
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
-      });
-      const state = await browserPage.getState(false);
-      const descriptors = buildResolveFieldTargetDescriptors(state);
-      const targets = protectedTargetsForSubject(options.subject.fields, descriptors);
-      const readyMatch = readyGroupMatch(options.match);
-      if (!readyMatch) {
-        return blockedProtectedGroupResult(options, 'match_not_ready');
-      }
-      const candidate = protectedCandidateForMatch(readyMatch, options.candidates);
-      if (!candidate) {
-        return blockedProtectedGroupResult(options, 'unknown_candidate_ref');
-      }
-
-      const result = await executeFillProtectedGroup({
-        artifactRef: readyMatch.artifactRef,
-        subject: {
-          ...options.subject,
-          fields: readyMatch.fields ?? options.subject.fields,
-        },
-        candidate: {
-          ...candidate,
-          ...(readyMatch.fieldPolicies ? { fieldPolicies: readyMatch.fieldPolicies } : {}),
-        },
-        targets,
-        artifactReader: options.artifactReader,
-        ...(options.assistiveResolver ? { assistiveResolver: options.assistiveResolver } : {}),
-        writer: createProtectedFieldWriter(browserPage, descriptors),
-        runRecorder,
-        redactionProfileRef: readyMatch.artifactRef,
-        onProtectedRedactionProfile: (profileRef, profile) => {
-          collectedProfiles[profileRef] = profile;
-        },
-      });
-
-      const updatedSession = touchPersistedMagicBrowseSession(session, {
-        runId: runRecorder.runId,
-        activePageIdentity: await readPageIdentity(page),
-        protectedRedactionProfiles:
-          Object.keys(collectedProfiles).length > 0 ? collectedProfiles : undefined,
-      });
-      await this.store.saveCurrentSession(updatedSession);
-      await runRecorder.update({
-        activePageIdentity: updatedSession.activePageIdentity,
-        protectedRedactionProfiles:
-          Object.keys(collectedProfiles).length > 0 ? collectedProfiles : undefined,
-      });
-      return result;
-    } catch (error) {
-      await runRecorder.append({
-        type: 'protected_fill.error',
-        level: 'error',
-        message: 'Protected group fill failed before completion.',
-        data: {
-          sessionId: session.id,
-          runId: runRecorder.runId,
-          fillRef: options.subject.fillRef,
-          status: 'blocked',
-          reason: 'fill_failed',
-        },
-      });
-      throw error;
-    } finally {
-      if (browser) {
-        await disconnectBrowser(browser);
-      }
-      await runRecorder.flush();
-    }
   }
 
   async screenshot(options: MagicBrowseScreenshotOptions = {}): Promise<MagicBrowseScreenshotResult> {
@@ -1127,6 +978,7 @@ export class MagicBrowseSessionManager {
     const session = await this.requireCurrentSession('submitFormTarget', options.sessionId);
     const runRecorder = await this.ensureSessionRun(session);
     let browser: Browser | undefined;
+    let nativeDialog: NativeBrowserDialogGuard | undefined;
 
     try {
       browser = await this.connect(session, { runRecorder }).catch((error: unknown) => {
@@ -1141,6 +993,10 @@ export class MagicBrowseSessionManager {
         displayHighlights: session.ownership === 'attached' || session.headless === false,
         minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
       });
+      nativeDialog = attachNativeBrowserDialogGuard(page, {
+        runRecorder,
+        redactionProfiles: session.redactionProfiles,
+      });
       const result = await executeSubmitFormTarget({
         ...options,
         sessionId: session.id,
@@ -1148,6 +1004,7 @@ export class MagicBrowseSessionManager {
         runRecorder,
         pageRef: options.target.pageRef,
         readPageIdentity: async () => readPageIdentity(page),
+        nativeDialog,
       });
       const updatedSession = touchPersistedMagicBrowseSession(session, {
         runId: runRecorder.runId,
@@ -1173,6 +1030,7 @@ export class MagicBrowseSessionManager {
       });
       throw error;
     } finally {
+      nativeDialog?.detach();
       if (browser) {
         await disconnectBrowser(browser);
       }
@@ -1414,6 +1272,10 @@ export class MagicBrowseSessionManager {
       readonly runRecorder: MagicBrowseRunRecorder;
       readonly page: Page;
       readonly browserPage: BrowserPage;
+      readonly nativeDialog: Pick<
+        NativeBrowserDialogGuard,
+        'lastDialog' | 'blockingDialog' | 'settle'
+      >;
     }) => Promise<MagicBrowseDeterministicActionResult>;
   }): Promise<MagicBrowseDeterministicActionResult> {
     const session = await this.loadCurrentSessionForDeterministicAction(input.sessionId);
@@ -1427,6 +1289,7 @@ export class MagicBrowseSessionManager {
 
     const runRecorder = await this.ensureSessionRun(session);
     let browser: Browser | undefined;
+    let nativeDialog: NativeBrowserDialogGuard | undefined;
 
     try {
       browser = await this.connect(session, { runRecorder }).catch((error: unknown) => {
@@ -1441,11 +1304,16 @@ export class MagicBrowseSessionManager {
         displayHighlights: session.ownership === 'attached' || session.headless === false,
         minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
       });
+      nativeDialog = attachNativeBrowserDialogGuard(page, {
+        runRecorder,
+        redactionProfiles: session.redactionProfiles,
+      });
       const result = await input.run({
         session,
         runRecorder,
         page,
         browserPage,
+        nativeDialog,
       });
       const updatedSession = touchPersistedMagicBrowseSession(session, {
         runId: runRecorder.runId,
@@ -1457,10 +1325,13 @@ export class MagicBrowseSessionManager {
       });
       return result;
     } catch {
+      await nativeDialog?.settle();
+      const dialog = nativeDialog?.blockingDialog();
       const result = buildMagicBrowseDeterministicActionBlockedResult({
         action: input.action,
-        reason: input.failureReason,
+        reason: dialog ? 'browser_dialog_open' : input.failureReason,
         targetRef: input.targetRef,
+        ...(dialog ? { dialog } : {}),
       });
       await runRecorder.append({
         type: 'deterministic_action.blocked',
@@ -1472,11 +1343,13 @@ export class MagicBrowseSessionManager {
           status: result.status,
           targetRef: result.targetRef,
           reason: result.reason,
+          dialog: result.dialog,
           summary: result.summary,
         },
       });
       return result;
     } finally {
+      nativeDialog?.detach();
       if (browser) {
         await disconnectBrowser(browser);
       }
@@ -1899,8 +1772,8 @@ export class MagicBrowseSessionManager {
       ...(session.humanVerificationResolved
         ? { humanVerificationResolved: session.humanVerificationResolved }
         : {}),
-      ...(session.protectedRedactionProfiles
-        ? { protectedRedactionProfiles: session.protectedRedactionProfiles }
+      ...(session.redactionProfiles
+        ? { redactionProfiles: session.redactionProfiles }
         : {}),
       observe: (options = {}) => this.observe({ ...options, sessionId: session.id }),
       act: (options) => this.act({ ...options, sessionId: session.id }),
@@ -1927,7 +1800,7 @@ export class MagicBrowseSessionManager {
       pid: session.pid,
       profile: session.profile,
       activePageIdentity: session.activePageIdentity,
-      protectedRedactionProfiles: session.protectedRedactionProfiles,
+      redactionProfiles: session.redactionProfiles,
     });
   }
 
@@ -1937,7 +1810,7 @@ export class MagicBrowseSessionManager {
     result: MagicBrowseStatusResult
   ): Promise<MagicBrowseStatusResult> {
     const redactedResult = redactSensitiveValue(result, {
-      protectedRedactionProfiles: session.protectedRedactionProfiles,
+      redactionProfiles: session.redactionProfiles,
     }) as MagicBrowseStatusResult;
     await runRecorder.append({
       type: 'status.complete',
@@ -2217,7 +2090,7 @@ function summarizeSession(session: PersistedMagicBrowseSession): Record<string, 
     proxy: session.proxy ? redactSensitiveValue(session.proxy) : undefined,
     stealth: session.stealth,
     humanVerificationResolved: session.humanVerificationResolved,
-    protectedRedactionProfiles: session.protectedRedactionProfiles,
+    redactionProfiles: session.redactionProfiles,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
   };
@@ -2433,114 +2306,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
-}
-
-function readyGroupMatch(
-  match: FillProtectedGroupInput['match']
-): MagicBrowseMatchReadyGroupResult | undefined {
-  return match.kind === 'ready_group' ? match : undefined;
-}
-
-function protectedCandidateForMatch(
-  match: MagicBrowseMatchReadyGroupResult,
-  candidates: readonly MagicBrowseMatchGroupCandidate[]
-): MagicBrowseMatchGroupCandidate | undefined {
-  return candidates.find((candidate) => candidate.candidateRef === match.candidateRef);
-}
-
-function protectedTargetsForSubject(
-  fields: FillProtectedGroupInput['subject']['fields'],
-  descriptors: readonly BrowserStateResolveFieldTargetDescriptor[]
-): readonly MagicBrowseProtectedFillTargetDescriptor[] {
-  const targetRefs = new Set(fields.map((field) => field.targetRef));
-  return descriptors
-    .filter((descriptor) => targetRefs.has(descriptor.ref))
-    .map((descriptor) => ({
-      targetRef: descriptor.ref,
-      label: descriptor.label,
-      displayLabel: descriptor.displayLabel,
-      kind: descriptor.kind,
-      selectorMapIndex: descriptor.selectorMapIndex,
-      context: {
-        hintText: [
-          descriptor.placeholder,
-          descriptor.text,
-          descriptor.inputName,
-          descriptor.autocomplete,
-        ]
-          .filter((value): value is string => typeof value === 'string' && value.length > 0)
-          .join(' '),
-      },
-    }));
-}
-
-function createProtectedFieldWriter(
-  page: Pick<
-    BrowserPage,
-    'getState' | 'inputTextElementNode' | 'selectDropdownOption' | 'selectDropdownOptionByValue'
-  >,
-  descriptors: readonly BrowserStateResolveFieldTargetDescriptor[]
-): MagicBrowseProtectedFieldWriter {
-  const descriptorByRef = new Map(descriptors.map((descriptor) => [descriptor.ref, descriptor]));
-
-  return {
-    async fill(input) {
-      const descriptor = descriptorByRef.get(input.targetRef);
-      if (!descriptor) {
-        throw new Error(`Protected fill target ${input.targetRef} is not available.`);
-      }
-      if (descriptor.kind === 'select') {
-        try {
-          await page.selectDropdownOptionByValue(descriptor.selectorMapIndex, input.value);
-          return;
-        } catch (error) {
-          if (!(error instanceof DropdownOptionValueNotFoundError)) {
-            throw new Error(`Protected select target ${input.targetRef} could not be filled.`);
-          }
-        }
-
-        try {
-          await page.selectDropdownOption(descriptor.selectorMapIndex, input.value);
-          return;
-        } catch {
-          throw new Error(`Protected select target ${input.targetRef} could not be filled.`);
-        }
-      }
-
-      const result = await executeMagicBrowseInputAction({
-        action: 'fill',
-        target: descriptor,
-        text: input.value,
-        page,
-        failOnClientValidation: true,
-      });
-      if (result.status === 'blocked') {
-        throw new Error(`Protected fill target ${input.targetRef} could not be filled.`);
-      }
-    },
-  };
-}
-
-function blockedProtectedGroupResult(
-  options: FillProtectedGroupInput,
-  reason: 'match_not_ready' | 'unknown_candidate_ref'
-): FillProtectedGroupResult {
-  const candidateRef =
-    'candidateRef' in options.match && typeof options.match.candidateRef === 'string'
-      ? options.match.candidateRef
-      : 'unknown';
-  const artifactRef =
-    'artifactRef' in options.match && typeof options.match.artifactRef === 'string'
-      ? options.match.artifactRef
-      : 'unknown';
-  return {
-    status: 'blocked',
-    reason,
-    fillRef: options.subject.fillRef,
-    candidateRef,
-    artifactRef,
-    summary: `protected_fill blocked fill=${options.subject.fillRef} candidate=${candidateRef} reason=${reason}`,
-  };
 }
 
 function errorToMessage(error: unknown): string {

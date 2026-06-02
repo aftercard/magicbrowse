@@ -1,7 +1,7 @@
 import { isFieldShapeCompatible } from './field-shape.js';
 
 export type MagicBrowseSemanticMatchPurpose =
-  | 'open_data'
+  | 'memory_field'
   | 'login'
   | 'identity'
   | 'payment_card';
@@ -12,14 +12,14 @@ export type MagicBrowseSemanticValueType = 'text' | 'email' | 'date' | 'secret';
 
 export type MagicBrowseSemanticCandidateSource =
   | 'memory'
-  | 'session_open_value'
+  | 'session_memory_value'
   | 'resolver';
 
 export type MagicBrowseSemanticApplicability =
   | { readonly target: 'global' }
   | { readonly target: 'host'; readonly value: string };
 
-export type MagicBrowseProtectedSemanticValueHint =
+export type MagicBrowseMemorySemanticValueHint =
   | 'direct'
   | 'full_name.given'
   | 'full_name.family'
@@ -27,16 +27,16 @@ export type MagicBrowseProtectedSemanticValueHint =
   | 'date_of_birth.month'
   | 'date_of_birth.year';
 
-export type MagicBrowseOpenDataValueHint =
+export type MagicBrowsePhoneValueHint =
   | 'phone.country_calling_code'
   | 'phone.national_number';
 
 export type MagicBrowseSemanticValueHint =
-  | MagicBrowseProtectedSemanticValueHint
-  | MagicBrowseOpenDataValueHint;
+  | MagicBrowseMemorySemanticValueHint
+  | MagicBrowsePhoneValueHint;
 
 export type MagicBrowseSemanticNoMatchReason =
-  | 'protected_target'
+  | 'memory_managed_target'
   | 'low_confidence'
   | 'incompatible_shape'
   | 'scope_ineligible'
@@ -125,7 +125,7 @@ export type MagicBrowseSemanticFieldResult =
       readonly candidateRef: string;
       readonly fieldKey: string;
       readonly valueRef: string;
-      readonly valueHint?: MagicBrowseOpenDataValueHint;
+      readonly valueHint?: MagicBrowsePhoneValueHint;
       readonly confidence: 'high' | 'medium';
     }
   | {
@@ -133,13 +133,13 @@ export type MagicBrowseSemanticFieldResult =
       readonly targetRef: string;
       readonly candidateRef: string;
       readonly fieldKey: string;
-      readonly valueHint?: MagicBrowseOpenDataValueHint;
+      readonly valueHint?: MagicBrowsePhoneValueHint;
       readonly confidence: 'high' | 'medium';
       readonly plan: {
         readonly targetRef: string;
         readonly candidateRef: string;
         readonly fieldKey: string;
-        readonly valueHint?: MagicBrowseOpenDataValueHint;
+        readonly valueHint?: MagicBrowsePhoneValueHint;
         readonly type: MagicBrowseSemanticValueType;
         readonly resolve: {
           readonly kind: 'external_lookup';
@@ -163,7 +163,7 @@ export interface MagicBrowseSemanticGroupField {
   readonly targetRef: string;
   readonly label?: string;
   readonly required?: boolean;
-  readonly valueHint?: MagicBrowseProtectedSemanticValueHint;
+  readonly valueHint?: MagicBrowseMemorySemanticValueHint;
 }
 
 export type MagicBrowseSemanticRejectedGroupFieldReason =
@@ -185,7 +185,7 @@ export interface MagicBrowseSemanticGroupResult {
   readonly groupRef?: string;
   readonly pageRef: string;
   readonly scopeRef?: string;
-  readonly purpose: Exclude<MagicBrowseSemanticMatchPurpose, 'open_data'>;
+  readonly purpose: Exclude<MagicBrowseSemanticMatchPurpose, 'memory_field'>;
   readonly confidence: 'high' | 'medium';
   readonly fields: readonly MagicBrowseSemanticGroupField[];
   readonly rejectedFields?: readonly MagicBrowseSemanticRejectedGroupField[];
@@ -214,7 +214,7 @@ export interface MagicBrowseSemanticMatchInput {
   readonly host?: string;
   readonly page?: MagicBrowseSemanticPageContext;
   readonly model: MagicBrowseSemanticMatcherModel;
-  readonly protectedTargetRefs?: ReadonlySet<string>;
+  readonly memoryFillTargetRefs?: ReadonlySet<string>;
 }
 
 export interface MagicBrowseSemanticMatchResult {
@@ -226,7 +226,7 @@ export interface MagicBrowseSemanticMatchResult {
 
 type RawRecord = Record<string, unknown>;
 
-const PROTECTED_GROUP_PURPOSES = new Set<MagicBrowseSemanticMatchPurpose>([
+const MEMORY_FILL_PURPOSES = new Set<MagicBrowseSemanticMatchPurpose>([
   'login',
   'identity',
   'payment_card',
@@ -258,7 +258,7 @@ export const MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA = {
             type: 'string',
             enum: [
               '',
-              'protected_target',
+              'memory_managed_target',
               'low_confidence',
               'incompatible_shape',
               'scope_ineligible',
@@ -363,7 +363,7 @@ export async function matchSemanticTargets(
     targets: input.targets,
     candidates: input.candidates ?? [],
     schemas: input.schemas,
-    protectedTargetRefs: input.protectedTargetRefs,
+    memoryFillTargetRefs: input.memoryFillTargetRefs,
   });
 }
 
@@ -382,15 +382,15 @@ export function buildSemanticMatchPrompt(input: {
       'Use only provided targetRef and candidateRef values.',
       'Do not invent fields, groups, values, or targets.',
       'Return low confidence or no match when uncertain.',
-      'Protected schemas include only field names and purposes; protected values are not provided.',
-      'For protected identity, do not include contact email or phone fields unless the schema explicitly allows them.',
+      'Memory fill schemas include only field names and purposes; values are not provided.',
+      'For Memory identity, do not include contact email or phone fields unless the schema explicitly allows them.',
       'Checkout country fields are open contact data unless the label clearly asks for nationality or issuing country.',
-      'For open_data, prefer the most specific candidate whose field meaning exactly matches the target.',
+      'For memory_field, prefer the most specific candidate whose field meaning exactly matches the target.',
       'A broad, aggregate, or adjacent candidate must not satisfy a narrower target unless the target asks for the same broad concept.',
       'Fields unrelated to completing the current user task should be no_match unless the task explicitly requires them.',
       'Use every available target signal: label, displayLabel, text, placeholder, inputName, inputType, autocomplete, role, tagName, and context.',
-      'For open_data phone fields, include valueHint phone.country_calling_code when the target asks only for the country calling code or prefix.',
-      'For open_data phone fields, include valueHint phone.national_number when the target asks for the local/national phone number without country calling code.',
+      'For memory_field phone fields, include valueHint phone.country_calling_code when the target asks only for the country calling code or prefix.',
+      'For memory_field phone fields, include valueHint phone.national_number when the target asks for the local/national phone number without country calling code.',
       'Omit valueHint when the target asks for the full phone number.',
     ],
     ...(input.host ? { host: input.host } : {}),
@@ -400,14 +400,14 @@ export function buildSemanticMatchPrompt(input: {
     schemas: input.schemas.map(sanitizeSchema),
     expectedOutput: {
       matches:
-        'For open_data, return entries with targetRef, candidateRef, fieldKey, confidence, optional valueHint.',
+        'For memory_field, return entries with targetRef, candidateRef, fieldKey, confidence, optional valueHint.',
       groups:
-        'For protected forms, return groups with purpose, fields[{targetRef, fieldKey, valueHint?}], confidence.',
+        'For memory fills, return groups with purpose, fields[{targetRef, fieldKey, valueHint?}], confidence.',
     },
   });
 }
 
-export function protectedSemanticSchemas(): readonly MagicBrowseSemanticSchemaDescriptor[] {
+export function memoryFillSemanticSchemas(): readonly MagicBrowseSemanticSchemaDescriptor[] {
   return [
     {
       schemaRef: 'login.basic',
@@ -460,7 +460,7 @@ export function protectedSemanticSchemas(): readonly MagicBrowseSemanticSchemaDe
   ];
 }
 
-export function openDataSemanticSchema(
+export function memoryFieldSemanticSchema(
   candidates: readonly MagicBrowseSemanticCandidateDescriptor[]
 ): MagicBrowseSemanticSchemaDescriptor {
   const fieldsByKey = new Map<string, MagicBrowseSemanticSchemaFieldDescriptor>();
@@ -483,8 +483,8 @@ export function openDataSemanticSchema(
   }
 
   return {
-    schemaRef: 'open_data.available_values',
-    purpose: 'open_data',
+    schemaRef: 'memory_field.available_values',
+    purpose: 'memory_field',
     fields: [...fieldsByKey.values()],
   };
 }
@@ -495,7 +495,7 @@ function validateSemanticMatcherOutput(
     readonly targets: readonly MagicBrowseSemanticTargetDescriptor[];
     readonly candidates: readonly MagicBrowseSemanticCandidateDescriptor[];
     readonly schemas: readonly MagicBrowseSemanticSchemaDescriptor[];
-    readonly protectedTargetRefs?: ReadonlySet<string>;
+    readonly memoryFillTargetRefs?: ReadonlySet<string>;
   }
 ): MagicBrowseSemanticMatchResult {
   const targetByRef = new Map(context.targets.map((target) => [target.ref, target]));
@@ -510,8 +510,8 @@ function validateSemanticMatcherOutput(
 
   const rawFieldEntries = readRawFieldEntries(raw);
   const rawGroups = readRawGroups(raw);
-  const hasProtectedSchema = context.schemas.some((schema) => isProtectedPurpose(schema.purpose));
-  if (rawGroups.length > 0 && !hasProtectedSchema) {
+  const hasMemoryFillSchema = context.schemas.some((schema) => isMemoryFillPurpose(schema.purpose));
+  if (rawGroups.length > 0 && !hasMemoryFillSchema) {
     return invalidSemanticResult(context.targets);
   }
 
@@ -520,7 +520,7 @@ function validateSemanticMatcherOutput(
       target,
       candidateByRef,
       schemaByPurpose,
-      protectedTargetRefs: context.protectedTargetRefs,
+      memoryFillTargetRefs: context.memoryFillTargetRefs,
     })
   );
 
@@ -568,11 +568,11 @@ function validateFieldEntry(
       MagicBrowseSemanticMatchPurpose,
       MagicBrowseSemanticSchemaDescriptor
     >;
-    readonly protectedTargetRefs?: ReadonlySet<string>;
+    readonly memoryFillTargetRefs?: ReadonlySet<string>;
   }
 ): MagicBrowseSemanticFieldResult {
-  if (context.protectedTargetRefs?.has(context.target.ref) === true) {
-    return noFieldMatch(context.target.ref, 'protected_target');
+  if (context.memoryFillTargetRefs?.has(context.target.ref) === true) {
+    return noFieldMatch(context.target.ref, 'memory_managed_target');
   }
   if (!raw) {
     return noFieldMatch(context.target.ref, 'low_confidence');
@@ -605,7 +605,7 @@ function validateFieldEntry(
   if (!candidate) {
     return noFieldMatch(context.target.ref, 'unknown_candidate_ref');
   }
-  const schemaField = schemaFieldForKey(context.schemaByPurpose.get('open_data'), raw.fieldKey);
+  const schemaField = schemaFieldForKey(context.schemaByPurpose.get('memory_field'), raw.fieldKey);
   if (!schemaField) {
     return noFieldMatch(context.target.ref, 'invalid_model_output');
   }
@@ -616,7 +616,7 @@ function validateFieldEntry(
     return noFieldMatch(context.target.ref, 'incompatible_shape');
   }
 
-  const valueHint = readOpenDataValueHint(raw.valueHint, schemaField);
+  const valueHint = readMemoryFieldValueHint(raw.valueHint, schemaField);
   if (valueHint === false) {
     return noFieldMatch(context.target.ref, 'invalid_model_output');
   }
@@ -704,7 +704,7 @@ function validateGroupEntry(
   const confidence = typeof raw.confidence === 'string' ? raw.confidence : undefined;
   const pageRef = readNonEmptyString(raw.pageRef);
 
-  if (!isProtectedPurpose(raw.purpose)) {
+  if (!isMemoryFillPurpose(raw.purpose)) {
     return rejectGroup({
       purpose,
       confidence,
@@ -868,7 +868,7 @@ function validateGroupField(
         : typeof schemaField.required === 'boolean'
           ? { required: schemaField.required }
           : {}),
-      ...(valueHint ? { valueHint: valueHint as MagicBrowseProtectedSemanticValueHint } : {}),
+      ...(valueHint ? { valueHint: valueHint as MagicBrowseMemorySemanticValueHint } : {}),
     },
   };
 }
@@ -959,10 +959,10 @@ function schemaFieldForKey(
   return schema?.fields.find((field) => field.fieldKey === fieldKey);
 }
 
-function readOpenDataValueHint(
+function readMemoryFieldValueHint(
   value: unknown,
   field: MagicBrowseSemanticSchemaFieldDescriptor
-): MagicBrowseOpenDataValueHint | undefined | false {
+): MagicBrowsePhoneValueHint | undefined | false {
   if (value === undefined || value === null || value === '') {
     return undefined;
   }
@@ -1105,15 +1105,15 @@ function isShapeCompatible(
   return isFieldShapeCompatible(target, candidate);
 }
 
-function isProtectedPurpose(
+function isMemoryFillPurpose(
   value: unknown
-): value is Exclude<MagicBrowseSemanticMatchPurpose, 'open_data'> {
-  return typeof value === 'string' && PROTECTED_GROUP_PURPOSES.has(value as never);
+): value is Exclude<MagicBrowseSemanticMatchPurpose, 'memory_field'> {
+  return typeof value === 'string' && MEMORY_FILL_PURPOSES.has(value as never);
 }
 
 function readNoMatchReason(value: unknown): MagicBrowseSemanticNoMatchReason {
   switch (value) {
-    case 'protected_target':
+    case 'memory_managed_target':
     case 'low_confidence':
     case 'incompatible_shape':
     case 'scope_ineligible':

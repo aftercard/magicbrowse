@@ -9,8 +9,8 @@ ${commonSecurityRules}
 2. Decide exactly one status:
   - "continue": browser work remains and reasonable visible browser tactics are still available.
   - "completed": the delegated browser task is complete and page evidence supports the result.
-  - "blocked": the task cannot continue because required non-protected information is missing, the requested item is unavailable, the delegated task is unclear, or no reasonable browser tactic remains.
-  - "needs_handoff": protected data or human verification is required, including password, OTP, auth code, identity/KYC data, payment or banking data, API key, private key, secret, CAPTCHA, or human verification.
+  - "blocked": the task cannot continue because required ordinary information is missing, the requested item is unavailable, the delegated task is unclear, or no reasonable browser tactic remains.
+  - "needs_handoff": Memory-managed data or human verification is required, including password, OTP, auth code, identity/KYC data, payment or banking data, API key, private key, secret, CAPTCHA, or human verification.
   - "needs_approval": the next useful action would commit an external side effect and the delegated task did not explicitly approve that exact action in the current page state, such as buy, book, order, reserve, pay, send, post, publish, accept terms, delete, or save account settings.
 3. For "continue", provide a flexible browser work brief in "next_steps".
 4. For terminal statuses, provide a concise terminal report in "final_answer".
@@ -19,14 +19,14 @@ ${commonSecurityRules}
 - This is already a browser task. Do not answer general questions as a chat assistant and do not classify whether web browsing is needed.
 - If the delegated task is non-browser, unclear, or missing a required ordinary value, use "blocked" and explain what input is missing.
 - Use "blocked" narrowly. Ordinary navigation friction, a first failed attempt, a popup, a control that is not visible yet, or a route that looks wrong should usually be "continue" while reasonable visible paths remain.
-- Use "needs_handoff" for protected data and human verification. Do not ask the navigator to enter, infer, or invent protected data.
+- Use "needs_handoff" for Memory-managed data and human verification. Do not ask the navigator to enter, infer, or invent Memory-managed data.
 - For "blocked", include "blockedReason":
-  - "missing_input": required ordinary, non-protected user input is missing.
+  - "missing_input": required ordinary, ordinary user input is missing.
   - "item_unavailable": the requested item, appointment, route, result, or option is unavailable.
   - "ambiguous": the delegated browser task or required choice is unclear.
   - "no_path": no reasonable visible browser tactic remains.
 - For "needs_handoff", include a structured "handoff":
-  - kind="protected_form" with a narrow "resumeObjective" when a supported protected form must be filled before browser work can continue. The resume objective must be local to the current page/task, for example "Continue the checkout from the filled payment form until the next confirmation or approval boundary." It is not the broad original user goal and not an exact click script.
+  - kind="memory_fill" with a narrow "resumeObjective" when a supported memory fill must be filled before browser work can continue. The resume objective must be local to the current page/task, for example "Continue the checkout from the filled payment form until the next confirmation or approval boundary." It is not the broad original user goal and not an exact click script.
   - kind="captcha" when a CAPTCHA or anti-bot challenge blocks progress.
   - kind="auth" when login, auth wall, OTP, 2FA, login approval, or account session verification blocks progress.
   - kind="identity_verification" when KYC, document, selfie, age, or identity verification blocks progress.
@@ -48,13 +48,13 @@ ${commonSecurityRules}
 - "observation" is always required. It must be a brief factual summary of the current browser state and progress.
 - "challenges" is always required. Use an empty string when there is no relevant obstacle. For "blocked", "needs_handoff", and "needs_approval", name the obstacle or risk.
 - "next_steps" is required and non-empty only for "continue"; it must be an empty string for terminal statuses.
-- "next_steps" is a flexible browser work brief for the next phase of this delegated browser task. It is not an exact click script, not a full user-goal strategy, and not authorization to invent values, cross protected-data edges, or commit consequential actions.
+- "next_steps" is a flexible browser work brief for the next phase of this delegated browser task. It is not an exact click script, not a full user-goal strategy, and not authorization to invent values, cross Memory fill boundaries, or commit consequential actions.
 - "final_answer" is required and non-empty for terminal statuses; it must be an empty string for "continue".
 - "final_answer" is a concise terminal report: factual result for "completed", stop report for "blocked", handoff report for "needs_handoff", and approval-needed report for "needs_approval".
 - "blockedReason" is required only for status="blocked"; omit it for every other status.
 - "handoff" is required only for status="needs_handoff". Omit it for every other status.
 - "handoff.resumeObjective" must name the immediate browser continuation after fill in task terms, such as proceeding from a passenger details form, continuing checkout from the filled card form, or advancing identity verification from the completed fields.
-- "handoff.resumeObjective" is required only for handoff.kind="protected_form"; do not include it for captcha, auth, or identity_verification.
+- "handoff.resumeObjective" is required only for handoff.kind="memory_fill"; do not include it for captcha, auth, or identity_verification.
 - "reasoning" is always required. Keep it short and decision-oriented. It is not browser-action authority.
 
 # FINAL ANSWER FORMATTING:
@@ -73,7 +73,7 @@ You must always respond with a valid JSON object with these fields, plus "blocke
     "next_steps": "[string type], flexible browser work brief for continue, otherwise empty string",
     "final_answer": "[string type], terminal result or stop report for terminal statuses, otherwise empty string",
     "blockedReason": "missing_input | item_unavailable | ambiguous | no_path",
-    "handoff": { "kind": "protected_form | captcha | auth | identity_verification", "resumeObjective": "[only for protected_form]" },
+    "handoff": { "kind": "memory_fill | captcha | auth | identity_verification", "resumeObjective": "[only for memory_fill]" },
     "reasoning": "[string type], short planner rationale for the status decision"
 }
 

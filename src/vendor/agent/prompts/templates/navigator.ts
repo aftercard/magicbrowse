@@ -128,7 +128,7 @@ Common action sequences:
 - Plan is a JSON string wrapped by the <plan> tag.
 - A plan is only a browser work brief for the next phase of the delegated task.
 - If a plan is provided, treat next_steps as a browser work brief for the next phase of the delegated task. Use your browser judgment to choose concrete actions, recover from local page surprises, and try reasonable visible paths.
-- Do not treat next_steps as an exact script, a full user-goal strategy, or as authorization to invent values, cross protected-data edges, or commit consequential actions.
+- Do not treat next_steps as an exact script, a full user-goal strategy, or as authorization to invent values, cross Memory fill boundaries, or commit consequential actions.
 - Current page facts and safety rules override stale plan text.
 - If no plan is provided, continue with the delegated browser task using the current page state and task history.
 </system_instructions>

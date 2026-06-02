@@ -4,14 +4,14 @@ import { DEFAULT_GENERAL_SETTINGS } from '../adapter/storage-stubs.js';
 import { BrowserContext } from '../browser/browser-context.js';
 import {
   buildActionTargetDescriptors,
-  buildResolveFieldTargetDescriptors,
+  buildMemoryFieldTargetDescriptors,
   buildSubmitTargetDescriptors,
   type BrowserStateTargetSource,
 } from '../resolution/targets.js';
 import { readPageIdentity } from '../transport/page-resolver.js';
 import type { MagicBrowseActivePageIdentity, MagicBrowseObserveResult } from '../types.js';
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
-import { redactSensitiveText, type ProtectedRedactionProfiles } from '../redaction.js';
+import { redactSensitiveText, type ExactValueRedactionProfiles } from '../redaction.js';
 import { buildBrowserPageSnapshot } from '../vendor/agent/prompts/browser-state-description.js';
 import { DEFAULT_AGENT_OPTIONS } from '../vendor/agent/types.js';
 
@@ -23,7 +23,7 @@ export interface ExecuteMagicBrowseObserveInput {
   readonly viewportExpansion?: number;
   readonly runRecorder?: MagicBrowseRunRecorder;
   readonly observeId?: string;
-  readonly protectedRedactionProfiles?: ProtectedRedactionProfiles;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
 }
 
 export interface ExecuteMagicBrowseObserveResult {
@@ -55,12 +55,12 @@ export async function executeMagicBrowseObserve(
     }).text;
     const plannerView = redactPlannerViewForOutput(
       rawPlannerView,
-      input.protectedRedactionProfiles
+      input.redactionProfiles
     );
     const finalPage = await ctx.getCurrentPuppeteerPage();
     const activePageIdentity = await readPageIdentity(finalPage);
     const result: MagicBrowseObserveResult = input.includeOrchestration
-      ? buildObservedResultWithOrchestration(plannerView, state, input.protectedRedactionProfiles)
+      ? buildObservedResultWithOrchestration(plannerView, state, input.redactionProfiles)
       : { plannerView };
 
     return {
@@ -74,13 +74,13 @@ export async function executeMagicBrowseObserve(
 
 function redactPlannerViewForOutput(
   plannerView: string,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): string {
-  if (!protectedRedactionProfiles) {
+  if (!redactionProfiles) {
     return plannerView;
   }
 
-  return redactSensitiveText(plannerView, { protectedRedactionProfiles });
+  return redactSensitiveText(plannerView, { redactionProfiles });
 }
 
 function buildFillableTargetsSummary(count: number): string {
@@ -96,19 +96,19 @@ function buildActionTargetsSummary(count: number): string {
 function buildObservedResultWithOrchestration(
   plannerView: string,
   state: BrowserStateTargetSource,
-  protectedRedactionProfiles: ProtectedRedactionProfiles | undefined
+  redactionProfiles: ExactValueRedactionProfiles | undefined
 ): MagicBrowseObserveResult {
-  const descriptors = buildResolveFieldTargetDescriptors(state);
+  const descriptors = buildMemoryFieldTargetDescriptors(state);
   const actionTargets = buildActionTargetDescriptors(state);
   const submitTargets = buildSubmitTargetDescriptors(state);
-  const safeDescriptors = protectedRedactionProfiles
-    ? redactOrchestrationDescriptorValue(descriptors, protectedRedactionProfiles)
+  const safeDescriptors = redactionProfiles
+    ? redactOrchestrationDescriptorValue(descriptors, redactionProfiles)
     : descriptors;
-  const safeActionTargets = protectedRedactionProfiles
-    ? redactOrchestrationDescriptorValue(actionTargets, protectedRedactionProfiles)
+  const safeActionTargets = redactionProfiles
+    ? redactOrchestrationDescriptorValue(actionTargets, redactionProfiles)
     : actionTargets;
-  const safeSubmitTargets = protectedRedactionProfiles
-    ? redactOrchestrationDescriptorValue(submitTargets, protectedRedactionProfiles)
+  const safeSubmitTargets = redactionProfiles
+    ? redactOrchestrationDescriptorValue(submitTargets, redactionProfiles)
     : submitTargets;
 
   return {
@@ -131,14 +131,14 @@ function buildObservedResultWithOrchestration(
 
 function redactOrchestrationDescriptorValue<T>(
   value: T,
-  protectedRedactionProfiles: ProtectedRedactionProfiles
+  redactionProfiles: ExactValueRedactionProfiles
 ): T {
-  return redactOrchestrationDescriptorEntry(value, protectedRedactionProfiles, new WeakSet()) as T;
+  return redactOrchestrationDescriptorEntry(value, redactionProfiles, new WeakSet()) as T;
 }
 
 function redactOrchestrationDescriptorEntry(
   value: unknown,
-  protectedRedactionProfiles: ProtectedRedactionProfiles,
+  redactionProfiles: ExactValueRedactionProfiles,
   seen: WeakSet<object>
 ): unknown {
   if (
@@ -150,7 +150,7 @@ function redactOrchestrationDescriptorEntry(
     return value;
   }
   if (typeof value === 'string') {
-    return redactSensitiveText(value, { protectedRedactionProfiles });
+    return redactSensitiveText(value, { redactionProfiles });
   }
   if (typeof value === 'bigint') {
     return value.toString();
@@ -167,7 +167,7 @@ function redactOrchestrationDescriptorEntry(
   seen.add(value);
   if (Array.isArray(value)) {
     const output = value.map((entry) =>
-      redactOrchestrationDescriptorEntry(entry, protectedRedactionProfiles, seen)
+      redactOrchestrationDescriptorEntry(entry, redactionProfiles, seen)
     );
     seen.delete(value);
     return output;
@@ -176,7 +176,7 @@ function redactOrchestrationDescriptorEntry(
   const output = Object.fromEntries(
     Object.entries(value).map(([key, entry]) => [
       key,
-      redactOrchestrationDescriptorEntry(entry, protectedRedactionProfiles, seen),
+      redactOrchestrationDescriptorEntry(entry, redactionProfiles, seen),
     ])
   );
   seen.delete(value);

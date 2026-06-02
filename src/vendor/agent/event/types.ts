@@ -73,7 +73,7 @@ export type ExecutionBlockedReason =
 
 export type ExecutionHandoff =
   | {
-      readonly kind: 'protected_form';
+      readonly kind: 'memory_fill';
       readonly resumeObjective: string;
     }
   | {

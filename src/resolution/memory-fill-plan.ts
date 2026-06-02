@@ -1,17 +1,20 @@
 import { createHash } from 'node:crypto';
 
 import {
-  buildProtectedExactValueProfile as buildExactValueRedactionProfile,
-  type ProtectedExactValueProfile as ExactValueRedactionProfile,
-  type ProtectedExactValueRule as ExactValueRedactionRule,
+  buildExactValueRedactionProfile,
+  type ExactValueRedactionProfile,
+  type ExactValueRedactionRule,
 } from '../redaction.js';
 import {
-  fillProtectedGroup as executeLegacyProtectedFillGroup,
-  type MagicBrowseProtectedArtifactReader as DelegatedFillArtifactReader,
-  type MagicBrowseProtectedAssistiveResolver as DelegatedFillAssistiveResolver,
-  type MagicBrowseProtectedFieldWriter as DelegatedFillFieldWriter,
-  type MagicBrowseProtectedFillTargetDescriptor as DelegatedFillTargetDescriptor,
-} from './fill-protected.js';
+  executeMemoryDelegatedFill as executeMemoryDelegatedFillGroup,
+  type MagicBrowseMemoryDelegatedAssistiveBinding as DelegatedFillAssistiveBinding,
+  type MagicBrowseMemoryDelegatedAssistiveResolutionInput as DelegatedFillAssistiveResolutionInput,
+  type MagicBrowseMemoryDelegatedAssistiveResolutionResult as DelegatedFillAssistiveResolutionResult,
+  type MagicBrowseMemoryDelegatedArtifactReader as DelegatedFillArtifactReader,
+  type MagicBrowseMemoryDelegatedAssistiveResolver as DelegatedFillAssistiveResolver,
+  type MagicBrowseMemoryDelegatedFieldWriter as DelegatedFillFieldWriter,
+  type MagicBrowseMemoryDelegatedFillTargetDescriptor as DelegatedFillTargetDescriptor,
+} from './memory-delegated-fill.js';
 import type { MagicBrowseMatchGroupCandidate, MagicBrowseMatchGroupSubject } from './match.js';
 
 export type MemoryFillFieldState =
@@ -170,6 +173,14 @@ export type MemoryRedactionProfileInstaller = (
     fieldName: string;
   }>
 ) => void | Promise<void>;
+
+export type MemoryDelegatedFillArtifactReader = DelegatedFillArtifactReader;
+export type MemoryDelegatedFillAssistiveBinding = DelegatedFillAssistiveBinding;
+export type MemoryDelegatedFillAssistiveResolver = DelegatedFillAssistiveResolver;
+export type MemoryDelegatedFillAssistiveResolutionInput = DelegatedFillAssistiveResolutionInput;
+export type MemoryDelegatedFillAssistiveResolutionResult = DelegatedFillAssistiveResolutionResult;
+export type MemoryDelegatedFillFieldWriter = DelegatedFillFieldWriter;
+export type MemoryDelegatedFillTargetDescriptor = DelegatedFillTargetDescriptor;
 
 export interface MemoryDelegatedFillExecutionDescriptor {
   readonly ref: string;
@@ -487,7 +498,7 @@ async function executeDelegatedMemoryField(
   }
 
   const redactionProfileRefs: string[] = [];
-  const result = await executeLegacyProtectedFillGroup({
+  const result = await executeMemoryDelegatedFillGroup({
     artifactRef: descriptor.artifactRef,
     subject: descriptor.subject,
     candidate: descriptor.candidate,
@@ -498,7 +509,7 @@ async function executeDelegatedMemoryField(
     ...(descriptor.redactionProfileRef
       ? { redactionProfileRef: descriptor.redactionProfileRef }
       : {}),
-    onProtectedRedactionProfile: async (profileRef, profile) => {
+    onRedactionProfile: async (profileRef, profile) => {
       delegatedRedactionProfiles.push(profile);
       redactionProfileRefs.push(profileRef);
       await input.installRedactionProfile?.({

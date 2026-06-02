@@ -1,16 +1,13 @@
-import {
-  matchOpenDataTargets,
-  type OpenDataCandidateApplicability,
-  type OpenDataCandidateDescriptor,
-  type OpenDataCandidateResolvePlan,
-  type OpenDataCandidateValueType,
-  type OpenDataTargetDescriptor,
-  type OpenDataTargetMatcherModel,
-} from './open-data-match.js';
-import type { ResolveFieldNoMatchReason } from './resolve-field.js';
-import type { OpenDataValueProjectionHint } from './value-projection.js';
+export type MagicBrowseMatchApplicability =
+  | { readonly target: 'global' }
+  | { readonly target: 'host'; readonly value: string };
 
-export type MagicBrowseProtectedBindingValueHint =
+export interface MagicBrowseMatchExternalResolvePlan {
+  readonly kind: 'external_lookup';
+  readonly key: string;
+}
+
+export type MagicBrowseMemoryBindingValueHint =
   | 'direct'
   | 'full_name.given'
   | 'full_name.family'
@@ -18,9 +15,9 @@ export type MagicBrowseProtectedBindingValueHint =
   | 'date_of_birth.month'
   | 'date_of_birth.year';
 
-export type MagicBrowseProtectedFieldPolicy = 'deterministic_only' | 'llm_assisted';
-export type MagicBrowseProtectedFieldPolicies = Readonly<
-  Partial<Record<string, MagicBrowseProtectedFieldPolicy>>
+export type MagicBrowseMemoryFieldPolicy = 'deterministic_only' | 'llm_assisted';
+export type MagicBrowseMemoryFieldPolicies = Readonly<
+  Partial<Record<string, MagicBrowseMemoryFieldPolicy>>
 >;
 
 export interface MagicBrowseMatchGroupField {
@@ -28,7 +25,7 @@ export interface MagicBrowseMatchGroupField {
   readonly targetRef: string;
   readonly label?: string;
   readonly required?: boolean;
-  readonly valueHint?: MagicBrowseProtectedBindingValueHint;
+  readonly valueHint?: MagicBrowseMemoryBindingValueHint;
 }
 
 export interface MagicBrowseMatchGroupRejectedField {
@@ -53,17 +50,10 @@ export interface MagicBrowseMatchGroupCandidate {
   readonly sourceRef?: string;
   readonly fieldKeys: readonly string[];
   readonly confidence?: 'high' | 'medium' | 'low';
-  readonly applicability?: OpenDataCandidateApplicability;
+  readonly applicability?: MagicBrowseMatchApplicability;
   readonly artifactRef?: string;
-  readonly resolve?: OpenDataCandidateResolvePlan;
-  readonly fieldPolicies?: MagicBrowseProtectedFieldPolicies;
-}
-
-export interface MagicBrowseMatchFieldInput {
-  readonly from: readonly OpenDataCandidateDescriptor[];
-  readonly host: string;
-  readonly model: OpenDataTargetMatcherModel;
-  readonly protectedTargetRefs?: ReadonlySet<string>;
+  readonly resolve?: MagicBrowseMatchExternalResolvePlan;
+  readonly fieldPolicies?: MagicBrowseMemoryFieldPolicies;
 }
 
 export interface MagicBrowseMatchGroupInput {
@@ -71,47 +61,8 @@ export interface MagicBrowseMatchGroupInput {
   readonly host?: string;
 }
 
-export type MagicBrowseMatchInput = MagicBrowseMatchFieldInput | MagicBrowseMatchGroupInput;
-export type MagicBrowseMatchSubject = OpenDataTargetDescriptor | MagicBrowseMatchGroupSubject;
-
-export interface MagicBrowseMatchReadyResult {
-  readonly kind: 'ready';
-  readonly targetRef: string;
-  readonly candidateRef: string;
-  readonly fieldKey: string;
-  readonly valueRef: string;
-  readonly valueHint?: OpenDataValueProjectionHint;
-  readonly confidence: 'high' | 'medium';
-}
-
-export interface MagicBrowseMatchNeedsResolutionResult {
-  readonly kind: 'needs_resolution';
-  readonly targetRef: string;
-  readonly candidateRef: string;
-  readonly fieldKey: string;
-  readonly valueHint?: OpenDataValueProjectionHint;
-  readonly confidence: 'high' | 'medium';
-  readonly plan: {
-    readonly targetRef: string;
-    readonly candidateRef: string;
-    readonly fieldKey: string;
-    readonly valueHint?: OpenDataValueProjectionHint;
-    readonly type: OpenDataCandidateValueType;
-    readonly resolve: OpenDataCandidateResolvePlan;
-  };
-}
-
-export interface MagicBrowseMatchAmbiguousResult {
-  readonly kind: 'ambiguous';
-  readonly targetRef: string;
-  readonly candidates: readonly string[];
-}
-
-export interface MagicBrowseMatchNoMatchResult {
-  readonly kind: 'no_match';
-  readonly targetRef: string;
-  readonly reason: ResolveFieldNoMatchReason;
-}
+export type MagicBrowseMatchInput = MagicBrowseMatchGroupInput;
+export type MagicBrowseMatchSubject = MagicBrowseMatchGroupSubject;
 
 export interface MagicBrowseMatchGroupResolutionPlan {
   readonly fillRef: string;
@@ -122,8 +73,8 @@ export interface MagicBrowseMatchGroupResolutionPlan {
   readonly sourceRef?: string;
   readonly fieldKeys: readonly string[];
   readonly fields?: readonly MagicBrowseMatchGroupField[];
-  readonly fieldPolicies?: MagicBrowseProtectedFieldPolicies;
-  readonly resolve: OpenDataCandidateResolvePlan;
+  readonly fieldPolicies?: MagicBrowseMemoryFieldPolicies;
+  readonly resolve: MagicBrowseMatchExternalResolvePlan;
 }
 
 export interface MagicBrowseMatchReadyGroupResult {
@@ -136,7 +87,7 @@ export interface MagicBrowseMatchReadyGroupResult {
   readonly artifactRef: string;
   readonly confidence: 'high' | 'medium';
   readonly fields?: readonly MagicBrowseMatchGroupField[];
-  readonly fieldPolicies?: MagicBrowseProtectedFieldPolicies;
+  readonly fieldPolicies?: MagicBrowseMemoryFieldPolicies;
 }
 
 export interface MagicBrowseMatchNeedsResolutionGroupResult {
@@ -148,7 +99,7 @@ export interface MagicBrowseMatchNeedsResolutionGroupResult {
   readonly fieldKeys: readonly string[];
   readonly confidence: 'high' | 'medium';
   readonly fields?: readonly MagicBrowseMatchGroupField[];
-  readonly fieldPolicies?: MagicBrowseProtectedFieldPolicies;
+  readonly fieldPolicies?: MagicBrowseMemoryFieldPolicies;
   readonly plan: MagicBrowseMatchGroupResolutionPlan;
 }
 
@@ -170,19 +121,13 @@ export interface MagicBrowseMatchNoMatchGroupResult {
   readonly reason: MagicBrowseMatchNoMatchGroupReason;
 }
 
-export type MagicBrowseMatchFieldResult =
-  | MagicBrowseMatchReadyResult
-  | MagicBrowseMatchNeedsResolutionResult
-  | MagicBrowseMatchAmbiguousResult
-  | MagicBrowseMatchNoMatchResult;
-
 export type MagicBrowseMatchGroupResult =
   | MagicBrowseMatchReadyGroupResult
   | MagicBrowseMatchNeedsResolutionGroupResult
   | MagicBrowseMatchAmbiguousGroupResult
   | MagicBrowseMatchNoMatchGroupResult;
 
-export type MagicBrowseMatchResult = MagicBrowseMatchFieldResult | MagicBrowseMatchGroupResult;
+export type MagicBrowseMatchResult = MagicBrowseMatchGroupResult;
 
 type RankedGroupCandidate = MagicBrowseMatchGroupCandidate & {
   readonly confidence?: 'high' | 'medium' | 'low';
@@ -191,93 +136,14 @@ type RankedGroupCandidate = MagicBrowseMatchGroupCandidate & {
 };
 
 export async function match(
-  subject: OpenDataTargetDescriptor,
-  input: MagicBrowseMatchFieldInput
-): Promise<MagicBrowseMatchFieldResult>;
-export async function match(
   subject: MagicBrowseMatchGroupSubject,
   input: MagicBrowseMatchGroupInput
 ): Promise<MagicBrowseMatchGroupResult>;
-export async function match(
+export function match(
   subject: MagicBrowseMatchSubject,
   input: MagicBrowseMatchInput
 ): Promise<MagicBrowseMatchResult> {
-  if (isGroupLikeSubject(subject)) {
-    return matchGroup(subject, input);
-  }
-
-  return matchField(subject, input);
-}
-
-async function matchField(
-  target: unknown,
-  input: MagicBrowseMatchInput
-): Promise<MagicBrowseMatchFieldResult> {
-  if (!isOpenDataTargetDescriptor(target)) {
-    return noFieldMatch('unknown', 'invalid_model_output');
-  }
-
-  if (!isMagicBrowseMatchFieldInput(input)) {
-    return noFieldMatch(target.ref, 'invalid_model_output');
-  }
-
-  if (!isOpenDataCandidateDescriptorList(input.from)) {
-    return noFieldMatch(target.ref, 'invalid_model_output');
-  }
-
-  const results = await matchOpenDataTargets({
-    targets: [target],
-    candidates: input.from,
-    host: input.host,
-    model: input.model,
-    protectedTargetRefs: input.protectedTargetRefs,
-  });
-
-  const result = results[0];
-  if (results.length !== 1 || !result) {
-    return noFieldMatch(target.ref, 'invalid_model_output');
-  }
-
-  switch (result.status) {
-    case 'matched': {
-      const candidate = input.from.find((item) => item.candidateRef === result.candidateRef);
-      if (!candidate || candidate.value === undefined) {
-        return noFieldMatch(result.targetRef, 'invalid_model_output');
-      }
-
-      return {
-        kind: 'ready',
-        targetRef: result.targetRef,
-        candidateRef: result.candidateRef,
-        fieldKey: result.fieldKey,
-        valueRef: result.valueRef,
-        ...(result.valueHint ? { valueHint: result.valueHint } : {}),
-        confidence: result.confidence,
-      };
-    }
-    case 'needs_resolution':
-      return {
-        kind: 'needs_resolution',
-        targetRef: result.targetRef,
-        candidateRef: result.candidateRef,
-        fieldKey: result.fieldKey,
-        ...(result.valueHint ? { valueHint: result.valueHint } : {}),
-        confidence: result.confidence,
-        plan: result.plan,
-      };
-    case 'ambiguous':
-      return {
-        kind: 'ambiguous',
-        targetRef: result.targetRef,
-        candidates: result.candidates,
-      };
-    case 'no_match':
-      return {
-        kind: 'no_match',
-        targetRef: result.targetRef,
-        reason: result.reason,
-      };
-  }
+  return Promise.resolve(matchGroup(subject, input));
 }
 
 function matchGroup(subject: unknown, input: MagicBrowseMatchInput): MagicBrowseMatchGroupResult {
@@ -391,51 +257,6 @@ function matchGroup(subject: unknown, input: MagicBrowseMatchInput): MagicBrowse
   return noGroupMatch(subject.fillRef, 'no_candidate');
 }
 
-function isMagicBrowseMatchFieldInput(input: MagicBrowseMatchInput): input is MagicBrowseMatchFieldInput {
-  return (
-    typeof (input as Partial<MagicBrowseMatchFieldInput>).host === 'string' &&
-    typeof (input as Partial<MagicBrowseMatchFieldInput>).model?.decide === 'function'
-  );
-}
-
-function isOpenDataTargetDescriptor(value: unknown): value is OpenDataTargetDescriptor {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  return typeof (value as { readonly ref?: unknown }).ref === 'string';
-}
-
-function isOpenDataCandidateDescriptorList(
-  value: readonly unknown[]
-): value is readonly OpenDataCandidateDescriptor[] {
-  return value.every(isOpenDataCandidateDescriptor);
-}
-
-function isOpenDataCandidateDescriptor(value: unknown): value is OpenDataCandidateDescriptor {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  const record = value as Partial<OpenDataCandidateDescriptor>;
-  return (
-    typeof record.candidateRef === 'string' &&
-    typeof record.fieldKey === 'string' &&
-    isOpenDataCandidateValueType(record.type) &&
-    isOpenDataCandidateSource(record.source) &&
-    isOpenDataApplicability(record.applicability) &&
-    (record.resolve === undefined || isOpenDataResolvePlan(record.resolve))
-  );
-}
-
-function isOpenDataCandidateSource(value: unknown): boolean {
-  return value === 'memory' || value === 'session_open_value' || value === 'resolver';
-}
-
-function isOpenDataCandidateValueType(value: unknown): value is OpenDataCandidateValueType {
-  return value === 'text' || value === 'email' || value === 'date' || value === 'secret';
-}
-
 function isGroupLikeSubject(value: unknown): boolean {
   return value !== null && typeof value === 'object' && !Array.isArray(value) && 'fillRef' in value;
 }
@@ -467,7 +288,7 @@ function isMagicBrowseMatchGroupField(value: unknown): value is MagicBrowseMatch
     typeof record.targetRef === 'string' &&
     (record.label === undefined || typeof record.label === 'string') &&
     (record.required === undefined || typeof record.required === 'boolean') &&
-    (record.valueHint === undefined || isProtectedBindingValueHint(record.valueHint))
+    (record.valueHint === undefined || isMemoryBindingValueHint(record.valueHint))
   );
 }
 
@@ -486,14 +307,14 @@ function isMagicBrowseMatchGroupCandidate(value: unknown): value is MagicBrowseM
     record.fieldKeys.every((fieldKey) => typeof fieldKey === 'string') &&
     record.fieldKeys.length > 0 &&
     isGroupConfidence(record.confidence) &&
-    (record.applicability === undefined || isOpenDataApplicability(record.applicability)) &&
+    (record.applicability === undefined || isMagicBrowseMatchApplicability(record.applicability)) &&
     (record.artifactRef === undefined || typeof record.artifactRef === 'string') &&
-    (record.resolve === undefined || isOpenDataResolvePlan(record.resolve)) &&
-    (record.fieldPolicies === undefined || isProtectedFieldPolicies(record.fieldPolicies))
+    (record.resolve === undefined || isMagicBrowseExternalResolvePlan(record.resolve)) &&
+    (record.fieldPolicies === undefined || isMemoryFieldPolicies(record.fieldPolicies))
   );
 }
 
-function isProtectedBindingValueHint(value: unknown): value is MagicBrowseProtectedBindingValueHint {
+function isMemoryBindingValueHint(value: unknown): value is MagicBrowseMemoryBindingValueHint {
   return (
     value === 'direct' ||
     value === 'full_name.given' ||
@@ -504,7 +325,7 @@ function isProtectedBindingValueHint(value: unknown): value is MagicBrowseProtec
   );
 }
 
-function isProtectedFieldPolicies(value: unknown): value is MagicBrowseProtectedFieldPolicies {
+function isMemoryFieldPolicies(value: unknown): value is MagicBrowseMemoryFieldPolicies {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return false;
   }
@@ -518,12 +339,12 @@ function isGroupConfidence(value: unknown): boolean {
   return value === undefined || value === 'high' || value === 'medium' || value === 'low';
 }
 
-function isOpenDataApplicability(value: unknown): value is OpenDataCandidateApplicability {
+function isMagicBrowseMatchApplicability(value: unknown): value is MagicBrowseMatchApplicability {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return false;
   }
 
-  const record = value as Partial<OpenDataCandidateApplicability>;
+  const record = value as Partial<MagicBrowseMatchApplicability>;
   if (record.target === 'global') {
     return true;
   }
@@ -531,12 +352,12 @@ function isOpenDataApplicability(value: unknown): value is OpenDataCandidateAppl
   return record.target === 'host' && typeof record.value === 'string';
 }
 
-function isOpenDataResolvePlan(value: unknown): value is OpenDataCandidateResolvePlan {
+function isMagicBrowseExternalResolvePlan(value: unknown): value is MagicBrowseMatchExternalResolvePlan {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return false;
   }
 
-  const record = value as Partial<OpenDataCandidateResolvePlan>;
+  const record = value as Partial<MagicBrowseMatchExternalResolvePlan>;
   return (
     record.kind === 'external_lookup' &&
     typeof record.key === 'string'
@@ -544,7 +365,7 @@ function isOpenDataResolvePlan(value: unknown): value is OpenDataCandidateResolv
 }
 
 function applicabilityMatches(
-  applicability: OpenDataCandidateApplicability | undefined,
+  applicability: MagicBrowseMatchApplicability | undefined,
   host: string | undefined
 ): boolean {
   if (!applicability || applicability.target === 'global') {
@@ -614,7 +435,7 @@ function groupResultMetadata(
   candidate: MagicBrowseMatchGroupCandidate
 ): {
   readonly fields?: readonly MagicBrowseMatchGroupField[];
-  readonly fieldPolicies?: MagicBrowseProtectedFieldPolicies;
+  readonly fieldPolicies?: MagicBrowseMemoryFieldPolicies;
 } {
   const hasValueHints = subject.fields.some((field) => field.valueHint !== undefined);
   return {
@@ -649,17 +470,6 @@ function groupFillRef(subject: unknown): string {
 
   const fillRef = (subject as { readonly fillRef?: unknown }).fillRef;
   return typeof fillRef === 'string' ? fillRef : 'unknown';
-}
-
-function noFieldMatch(
-  targetRef: string,
-  reason: ResolveFieldNoMatchReason
-): MagicBrowseMatchNoMatchResult {
-  return {
-    kind: 'no_match',
-    targetRef,
-    reason,
-  };
 }
 
 function noGroupMatch(

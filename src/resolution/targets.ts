@@ -6,15 +6,37 @@ import type {
   MagicBrowseSubmitTargetDescriptor,
   MagicBrowseSubmitTargetKind,
 } from '../types.js';
-import type { ResolveFieldTargetDescriptor } from './resolve-field.js';
 
-export type ResolveFieldTargetKind = 'input' | 'textarea' | 'select' | 'select-like';
+export type MemoryFieldTargetKind = 'input' | 'textarea' | 'select' | 'select-like';
 
-export interface ResolveFieldTargetSignals {
+export interface MemoryFieldTargetDescriptor {
+  readonly ref: string;
+  readonly index?: number;
+  readonly selectorMapIndex?: number;
+  readonly pageRef?: string;
+  readonly kind?: string;
+  readonly tagName?: string;
+  readonly role?: string;
+  readonly label?: string;
+  readonly displayLabel?: string;
+  readonly text?: string;
+  readonly placeholder?: string;
+  readonly inputName?: string;
+  readonly inputType?: string;
+  readonly autocomplete?: string;
+  readonly selectorRoot?: string;
+  readonly isReadonly?: boolean;
+  readonly popupBacked?: boolean;
+  readonly allowedActions?: readonly string[];
+  readonly host?: string;
+  readonly context?: unknown;
+}
+
+export interface MemoryFieldTargetSignals {
   readonly ref: string;
   readonly index: number;
   readonly selectorMapIndex: number;
-  readonly kind: ResolveFieldTargetKind;
+  readonly kind: MemoryFieldTargetKind;
   readonly tagName: string;
   readonly role?: string;
   readonly label?: string;
@@ -29,7 +51,7 @@ export interface ResolveFieldTargetSignals {
   readonly popupBacked: boolean;
 }
 
-export interface ResolveFieldTargetSourceContext {
+export interface MemoryFieldTargetSourceContext {
   readonly kind: 'selectorMap';
   readonly ref: string;
   readonly index: number;
@@ -37,7 +59,7 @@ export interface ResolveFieldTargetSourceContext {
   readonly snapshotScoped: true;
 }
 
-export interface ResolveFieldTargetSelectorContext {
+export interface MemoryFieldTargetSelectorContext {
   readonly id?: string;
   readonly name?: string;
   readonly role?: string;
@@ -45,7 +67,7 @@ export interface ResolveFieldTargetSelectorContext {
   readonly css?: string;
 }
 
-export interface ResolveFieldTargetStateContext {
+export interface MemoryFieldTargetStateContext {
   readonly readonly: boolean;
   readonly popupBacked: boolean;
   readonly disabled: boolean;
@@ -53,25 +75,25 @@ export interface ResolveFieldTargetStateContext {
   readonly expanded?: string;
 }
 
-export interface ResolveFieldTargetFormContext {
+export interface MemoryFieldTargetFormContext {
   readonly tagName: string;
   readonly id?: string;
   readonly name?: string;
   readonly label?: string;
 }
 
-export interface ResolveFieldTargetContext {
-  readonly source: ResolveFieldTargetSourceContext;
-  readonly selector: ResolveFieldTargetSelectorContext;
-  readonly state: ResolveFieldTargetStateContext;
-  readonly form?: ResolveFieldTargetFormContext;
+export interface MemoryFieldTargetContext {
+  readonly source: MemoryFieldTargetSourceContext;
+  readonly selector: MemoryFieldTargetSelectorContext;
+  readonly state: MemoryFieldTargetStateContext;
+  readonly form?: MemoryFieldTargetFormContext;
 }
 
-export type BrowserStateResolveFieldTargetDescriptor = ResolveFieldTargetDescriptor &
-  ResolveFieldTargetSignals & {
+export type BrowserStateMemoryFieldTargetDescriptor = MemoryFieldTargetDescriptor &
+  MemoryFieldTargetSignals & {
     readonly pageRef?: string;
     readonly host?: string;
-    readonly context: ResolveFieldTargetContext;
+    readonly context: MemoryFieldTargetContext;
   };
 
 export type BrowserStateTargetSource = Pick<
@@ -79,7 +101,7 @@ export type BrowserStateTargetSource = Pick<
   'elementTree' | 'selectorMap' | 'tabId' | 'url'
 >;
 
-export interface ExtractResolveFieldTargetSignalsInput {
+export interface ExtractMemoryFieldTargetSignalsInput {
   readonly state?: Pick<BrowserStateTargetSource, 'elementTree'>;
   readonly element: DOMElementNode;
   readonly selectorMapIndex: number;
@@ -98,13 +120,13 @@ const SUBMIT_TEXT_RE =
  * Descriptor refs intentionally point back to this state's selectorMap index;
  * future fill code must revalidate them against a fresh state before acting.
  */
-export function buildResolveFieldTargetDescriptors(
+export function buildMemoryFieldTargetDescriptors(
   state: BrowserStateTargetSource
-): readonly BrowserStateResolveFieldTargetDescriptor[] {
-  const descriptors: BrowserStateResolveFieldTargetDescriptor[] = [];
+): readonly BrowserStateMemoryFieldTargetDescriptor[] {
+  const descriptors: BrowserStateMemoryFieldTargetDescriptor[] = [];
 
   for (const [selectorMapIndex, element] of state.selectorMap.entries()) {
-    const descriptor = createResolveFieldTargetDescriptor({
+    const descriptor = createMemoryFieldTargetDescriptor({
       state,
       element,
       selectorMapIndex,
@@ -155,17 +177,17 @@ export function buildActionTargetDescriptors(
   return descriptors;
 }
 
-export function createResolveFieldTargetDescriptor(input: {
+export function createMemoryFieldTargetDescriptor(input: {
   readonly state: BrowserStateTargetSource;
   readonly element: DOMElementNode;
   readonly selectorMapIndex: number;
-}): BrowserStateResolveFieldTargetDescriptor | null {
-  const signals = extractResolveFieldTargetSignals(input);
+}): BrowserStateMemoryFieldTargetDescriptor | null {
+  const signals = extractMemoryFieldTargetSignals(input);
   if (!signals) {
     return null;
   }
 
-  const context = buildResolveFieldTargetContext(input.element, signals);
+  const context = buildMemoryFieldTargetContext(input.element, signals);
   const pageRef = `tab:${input.state.tabId}`;
   const host = hostFromUrl(input.state.url);
 
@@ -346,10 +368,10 @@ export function createSubmitTargetDescriptor(input: {
   };
 }
 
-export function extractResolveFieldTargetSignals(
-  input: ExtractResolveFieldTargetSignalsInput
-): ResolveFieldTargetSignals | null {
-  const kind = resolveFieldTargetKind(input.element);
+export function extractMemoryFieldTargetSignals(
+  input: ExtractMemoryFieldTargetSignalsInput
+): MemoryFieldTargetSignals | null {
+  const kind = memoryFieldTargetKind(input.element);
   if (!kind) {
     return null;
   }
@@ -394,13 +416,13 @@ export function extractResolveFieldTargetSignals(
   };
 }
 
-export function isResolveFieldTargetElement(element: DOMElementNode): boolean {
-  return resolveFieldTargetKind(element) !== null;
+export function isMemoryFieldTargetElement(element: DOMElementNode): boolean {
+  return memoryFieldTargetKind(element) !== null;
 }
 
 export function resolveSelectorMapElementForTarget(
   state: Pick<BrowserStateTargetSource, 'selectorMap'>,
-  target: Pick<ResolveFieldTargetDescriptor, 'ref' | 'selectorMapIndex'>
+  target: Pick<MemoryFieldTargetDescriptor, 'ref' | 'selectorMapIndex'>
 ): DOMElementNode | undefined {
   const index = target.selectorMapIndex ?? parseSelectorMapTargetRef(target.ref);
   return index === null ? undefined : state.selectorMap.get(index);
@@ -437,7 +459,7 @@ export function parseSelectorMapTargetRef(ref: string): number | null {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
-function resolveFieldTargetKind(element: DOMElementNode): ResolveFieldTargetKind | null {
+function memoryFieldTargetKind(element: DOMElementNode): MemoryFieldTargetKind | null {
   const tagName = normalizeTagName(element);
   if (tagName === 'textarea') {
     return isReadonlyControl(element) ? null : 'textarea';
@@ -534,18 +556,18 @@ function isSubmitLikeElement(element: DOMElementNode): boolean {
   );
 }
 
-function buildResolveFieldTargetContext(
+function buildMemoryFieldTargetContext(
   element: DOMElementNode,
-  signals: ResolveFieldTargetSignals
-): ResolveFieldTargetContext {
-  const selector: ResolveFieldTargetSelectorContext = omitUndefined({
+  signals: MemoryFieldTargetSignals
+): MemoryFieldTargetContext {
+  const selector: MemoryFieldTargetSelectorContext = omitUndefined({
     id: readAttribute(element, 'id'),
     name: signals.inputName,
     role: signals.role,
     xpath: normalizeText(element.xpath),
     css: signals.selectorRoot,
   });
-  const state: ResolveFieldTargetStateContext = omitUndefined({
+  const state: MemoryFieldTargetStateContext = omitUndefined({
     readonly: signals.isReadonly,
     popupBacked: signals.popupBacked,
     disabled:
@@ -557,7 +579,7 @@ function buildResolveFieldTargetContext(
     expanded: readAttribute(element, 'aria-expanded'),
   });
   const form = nearestFormContext(element);
-  const source: ResolveFieldTargetSourceContext = {
+  const source: MemoryFieldTargetSourceContext = {
     kind: 'selectorMap',
     ref: signals.ref,
     index: signals.selectorMapIndex,
@@ -659,7 +681,7 @@ function wrappingLabelText(element: DOMElementNode): string | undefined {
 
 function extractTextSignal(
   element: DOMElementNode,
-  kind: ResolveFieldTargetKind
+  kind: MemoryFieldTargetKind
 ): string | undefined {
   if (kind === 'input' || kind === 'textarea') {
     return undefined;
@@ -672,7 +694,7 @@ function nodeText(element: DOMElementNode): string | undefined {
   return normalizeText(element.getAllTextTillNextClickableElement());
 }
 
-function nearestFormContext(element: DOMElementNode): ResolveFieldTargetFormContext | undefined {
+function nearestFormContext(element: DOMElementNode): MemoryFieldTargetFormContext | undefined {
   let current = element.parent;
   while (current) {
     const tagName = normalizeTagName(current);

@@ -4,7 +4,7 @@ export type FakeFieldValue = string | number | boolean | null;
 
 export type FakeFieldValueType = 'text' | 'email' | 'date' | 'secret';
 
-export type FakeFieldSource = 'memory' | 'session_open_value' | 'resolver';
+export type FakeFieldSource = 'memory' | 'session_memory_value' | 'resolver';
 
 export type FakeApplicability =
   | { readonly target: 'global' }
@@ -38,81 +38,21 @@ export interface FakeCandidate {
   readonly label?: string;
   readonly semanticTags?: readonly string[];
   readonly applicability: FakeApplicability;
-  readonly resolve?: FakeResolvePlan['resolve'];
+  readonly resolve?: FakeExternalResolvePlan;
 }
 
-export interface FakeResolvePlan {
-  readonly targetRef: string;
-  readonly candidateRef: string;
-  readonly fieldKey: string;
-  readonly type: FakeFieldValueType;
-  readonly resolve: {
-    readonly kind: 'external_lookup';
-    readonly key: string;
-  };
+export interface FakeExternalResolvePlan {
+  readonly kind: 'external_lookup';
+  readonly key: string;
 }
-
-export type FakeResolveFieldDecision =
-  | {
-      readonly status: 'matched';
-      readonly targetRef: string;
-      readonly candidateRef: string;
-      readonly fieldKey: string;
-      readonly confidence: 'high' | 'medium';
-    }
-  | {
-      readonly status: 'needs_resolution';
-      readonly targetRef: string;
-      readonly candidateRef: string;
-      readonly fieldKey: string;
-      readonly confidence: 'high' | 'medium';
-    }
-  | {
-      readonly status: 'ambiguous';
-      readonly targetRef: string;
-      readonly candidates: readonly string[];
-    }
-  | {
-      readonly status: 'no_match';
-      readonly targetRef: string;
-      readonly reason: FakeNoMatchReason;
-    };
 
 export type FakeNoMatchReason =
-  | 'protected_target'
+  | 'memory_managed_target'
   | 'low_confidence'
   | 'incompatible_shape'
   | 'scope_ineligible'
   | 'unknown_candidate_ref'
   | 'invalid_model_output';
-
-export type FakeResolveFieldPublicResult =
-  | {
-      readonly status: 'matched';
-      readonly targetRef: string;
-      readonly fieldKey: string;
-      readonly candidateRef: string;
-      readonly valueRef: string;
-      readonly confidence: 'high' | 'medium';
-    }
-  | {
-      readonly status: 'needs_resolution';
-      readonly targetRef: string;
-      readonly fieldKey: string;
-      readonly candidateRef: string;
-      readonly confidence: 'high' | 'medium';
-      readonly plan: FakeResolvePlan;
-    }
-  | {
-      readonly status: 'ambiguous';
-      readonly targetRef: string;
-      readonly candidates: readonly string[];
-    }
-  | {
-      readonly status: 'no_match';
-      readonly targetRef: string;
-      readonly reason: FakeNoMatchReason;
-    };
 
 export type FakePlannerRequest = MagicBrowseSemanticMatcherRequest & {
   readonly target: FakeTargetDescriptor;
@@ -132,27 +72,11 @@ export interface FakeCandidateStore {
   read(candidateRef: string): FakeFieldValue | undefined;
 }
 
-export interface FakeResolver {
-  readonly resolveCalls: readonly FakeResolvePlan[];
-  resolve(plan: FakeResolvePlan): Promise<{ readonly kind: 'value'; readonly value: FakeFieldValue }>;
-}
-
 export interface FakeFillRecorder {
   readonly fillCalls: readonly unknown[];
   readonly fallbackCalls: readonly unknown[];
   fill(input: unknown): Promise<void>;
   fallback(input: unknown): Promise<void>;
-}
-
-export interface FakeResolveFieldInput {
-  readonly target: FakeTargetDescriptor;
-  readonly candidates: readonly FakeCandidate[];
-  readonly host: string;
-  readonly model: FakePlannerModel;
-  readonly protectedTargetRefs?: ReadonlySet<string>;
-  readonly store?: FakeCandidateStore;
-  readonly resolver?: FakeResolver;
-  readonly fill?: FakeFillRecorder;
 }
 
 export function fakeTarget(
@@ -170,7 +94,7 @@ export function fakeTarget(
     context: {
       landmark: {
         kind: 'form',
-        label: 'MagicBrowse resolve field test form',
+        label: 'MagicBrowse memory field test form',
       },
     },
     ...options,
@@ -214,27 +138,6 @@ export function createFakeCandidateStore(
   };
 }
 
-export function createFakeResolver(
-  resourcesByCandidateRef: Readonly<Record<string, FakeFieldValue>>
-): FakeResolver {
-  const resolveCalls: FakeResolvePlan[] = [];
-
-  return {
-    resolveCalls,
-    async resolve(plan: FakeResolvePlan) {
-      resolveCalls.push(plan);
-      const value = resourcesByCandidateRef[plan.candidateRef];
-      if (value === undefined) {
-        throw new Error(`Missing fake resolver value for ${plan.candidateRef}.`);
-      }
-      return {
-        kind: 'value',
-        value,
-      };
-    },
-  };
-}
-
 export function createFakePlannerModel(
   decisions: readonly unknown[]
 ): FakePlannerModel {
@@ -269,43 +172,6 @@ export function createFakeFillRecorder(): FakeFillRecorder {
       fallbackCalls.push(input);
     },
   };
-}
-
-export function buildFakeResolveFieldPrompt(
-  input: {
-    readonly target: FakeTargetDescriptor;
-    readonly candidates: readonly FakeCandidate[];
-    readonly host: string;
-  },
-  options: {
-    readonly includeRawValues?: boolean;
-  } = {}
-): string {
-  const candidates = input.candidates.map((candidate) => ({
-    candidateRef: candidate.candidateRef,
-    fieldKey: candidate.fieldKey,
-    source: candidate.source,
-    type: candidate.type,
-    label: candidate.label,
-    semanticTags: candidate.semanticTags,
-    applicability: candidate.applicability,
-    ...(candidate.resolve ? { resolve: candidate.resolve } : {}),
-    ...(options.includeRawValues ? { value: candidate.value } : {}),
-  }));
-
-  return JSON.stringify({
-    task: 'resolveField',
-    host: input.host,
-    target: {
-      ref: input.target.ref,
-      kind: input.target.kind,
-      label: input.target.label,
-      inputType: input.target.inputType,
-      autocomplete: input.target.autocomplete,
-      context: input.target.context,
-    },
-    candidates,
-  });
 }
 
 export function publicJsonContainsRawValue(
