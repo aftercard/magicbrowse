@@ -33,6 +33,7 @@ export interface MemoryDescriptorMatcherRequest {
   readonly targets: readonly MemorySafeTargetDescriptor[];
   readonly target?: MemorySafeTargetDescriptor;
   readonly descriptors: readonly MemorySafeFieldDescriptor[];
+  readonly allowedTargetRoles?: readonly string[];
   readonly prompt: string;
 }
 
@@ -58,6 +59,11 @@ export type MatchMemoryTargetResult =
       readonly fieldRef: string;
       readonly fieldName: string;
       readonly confidence: "high" | "medium";
+      readonly targetRoleHint?: string;
+      /**
+       * @deprecated Legacy matcher metadata. Memory fill planning must not use it
+       * to create typed projections.
+       */
       readonly projectionHint?: string;
     }
   | {
@@ -89,6 +95,7 @@ export interface MatchMemoryTargetsInput {
   };
   readonly taskPurpose?: Record<string, unknown>;
   readonly plannerSignals?: Record<string, unknown>;
+  readonly allowedTargetRoles?: readonly string[];
   readonly model: MemoryDescriptorMatcherModel;
 }
 
@@ -155,6 +162,7 @@ export async function matchMemoryTargets(
   }
 
   const safeDescriptors = eligibleDescriptors.map(sanitizeDescriptor);
+  const allowedTargetRoles = sanitizeAllowedTargetRoles(input.allowedTargetRoles);
   const request: MemoryDescriptorMatcherRequest = {
     task: "memoryDescriptorMatching",
     matcherModel: "fast",
@@ -165,6 +173,7 @@ export async function matchMemoryTargets(
     targets: safeTargets,
     ...(safeTargets.length === 1 ? { target: safeTargets[0] } : {}),
     descriptors: safeDescriptors,
+    ...(allowedTargetRoles.length > 0 ? { allowedTargetRoles } : {}),
     prompt: buildMemoryMatchPrompt({
       targets: safeTargets,
       descriptors: safeDescriptors,
@@ -172,6 +181,7 @@ export async function matchMemoryTargets(
       page: input.page,
       taskPurpose: input.taskPurpose,
       plannerSignals: input.plannerSignals,
+      allowedTargetRoles,
     }),
   };
 
@@ -187,6 +197,7 @@ export async function matchMemoryTargets(
   return validateMemoryMatcherOutput(modelOutput, {
     targets: input.targets,
     descriptors: eligibleDescriptors,
+    allowedTargetRoles,
   });
 }
 
@@ -197,7 +208,9 @@ export function buildMemoryMatchPrompt(input: {
   readonly page?: MatchMemoryTargetsInput["page"];
   readonly taskPurpose?: Record<string, unknown>;
   readonly plannerSignals?: Record<string, unknown>;
+  readonly allowedTargetRoles?: readonly string[];
 }): string {
+  const allowedTargetRoles = sanitizeAllowedTargetRoles(input.allowedTargetRoles);
   return JSON.stringify({
     task: "memoryDescriptorMatching",
     matcherModel: "fast",
@@ -214,6 +227,8 @@ export function buildMemoryMatchPrompt(input: {
       "Optional newsletter or marketing targets may be no_match when the task purpose does not require them.",
       "isSecret and providerManaged are safety metadata only; those descriptors remain eligible when their value-free field facts fit the target.",
       "Do not return no_match only because a descriptor is secret, provider-managed, or lacks a raw value; card number and card security code descriptors can match card number and CVC targets value-free.",
+      "For split-part typed targets, you may return targetRoleHint only when the role is highly certain, chosen exactly from allowedTargetRoles, and based only on target signals.",
+      "Omit targetRoleHint for full fields, uncertain split roles, or when no allowedTargetRoles entry clearly fits.",
       "Descriptors are value-free. Raw values, value handles, policy internals, trust rules, and backend-only data are not provided.",
       "Return compact output only: do not echo field names, field keys, field types, raw values, value handles, policy internals, explanations, or unused empty fields.",
     ],
@@ -221,11 +236,12 @@ export function buildMemoryMatchPrompt(input: {
     ...(input.page ? { page: sanitizePage(input.page) } : {}),
     ...(input.taskPurpose ? { taskPurpose: input.taskPurpose } : {}),
     ...(input.plannerSignals ? { plannerSignals: input.plannerSignals } : {}),
+    ...(allowedTargetRoles.length > 0 ? { allowedTargetRoles } : {}),
     targets: input.targets,
     descriptors: input.descriptors,
     expectedOutput: {
       matches:
-        "Return matches[{targetRef,fieldRef,confidence,projectionHint?}], ambiguous[{targetRef,fieldRefs}], and noMatches[{targetRef,reason?}].",
+        "Return matches[{targetRef,fieldRef,confidence,targetRoleHint?}], ambiguous[{targetRef,fieldRefs}], and noMatches[{targetRef,reason?}].",
     },
   });
 }
@@ -235,6 +251,7 @@ function validateMemoryMatcherOutput(
   context: {
     readonly targets: readonly MemoryTargetDescriptor[];
     readonly descriptors: readonly MemoryFieldDescriptor[];
+    readonly allowedTargetRoles?: readonly string[];
   },
 ): MatchMemoryTargetsResult {
   const raw = asRecord(output);
@@ -247,6 +264,9 @@ function validateMemoryMatcherOutput(
   const descriptorByRef = new Map(
     context.descriptors.map((descriptor) => [descriptor.fieldRef, descriptor]),
   );
+  const allowedTargetRoles = new Set(
+    sanitizeAllowedTargetRoles(context.allowedTargetRoles),
+  );
   const rawEntries = readRawEntries(raw);
   if (rawEntries.length === 0) {
     return context.targets.map((target) =>
@@ -258,6 +278,7 @@ function validateMemoryMatcherOutput(
     validateMemoryEntry(readEntryForTarget(rawEntries, target.ref), {
       target,
       descriptorByRef,
+      allowedTargetRoles,
     }),
   );
 }
@@ -267,6 +288,7 @@ function validateMemoryEntry(
   context: {
     readonly target: MemoryTargetDescriptor;
     readonly descriptorByRef: ReadonlyMap<string, MemoryFieldDescriptor>;
+    readonly allowedTargetRoles: ReadonlySet<string>;
   },
 ): MatchMemoryTargetResult {
   if (!raw) {
@@ -310,6 +332,10 @@ function validateMemoryEntry(
   if (projectionHint === false) {
     return invalid(context.target.ref, "invalid_projection_hint");
   }
+  const targetRoleHint = readTargetRoleHint(raw.targetRoleHint, {
+    confidence: raw.confidence,
+    allowedTargetRoles: context.allowedTargetRoles,
+  });
 
   return {
     status: "matched",
@@ -317,6 +343,7 @@ function validateMemoryEntry(
     fieldRef: descriptor.fieldRef,
     fieldName: descriptor.fieldName,
     confidence: raw.confidence,
+    ...(targetRoleHint ? { targetRoleHint } : {}),
     ...(projectionHint ? { projectionHint } : {}),
   };
 }
@@ -572,6 +599,29 @@ function readProjectionHint(
     return false;
   }
   return descriptor.projectionHints?.includes(value) === true ? value : false;
+}
+
+function readTargetRoleHint(
+  value: unknown,
+  options: {
+    readonly confidence: "high" | "medium";
+    readonly allowedTargetRoles: ReadonlySet<string>;
+  },
+): string | undefined {
+  if (options.confidence !== "high") {
+    return undefined;
+  }
+  const targetRoleHint = readString(value);
+  return targetRoleHint && options.allowedTargetRoles.has(targetRoleHint)
+    ? targetRoleHint
+    : undefined;
+}
+
+function sanitizeAllowedTargetRoles(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return [...new Set(value.flatMap((entry) => readString(entry) ?? []))];
 }
 
 function readNoMatchReason(value: unknown): MemoryMatchNoMatchReason {

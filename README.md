@@ -48,7 +48,9 @@ Three terms come up repeatedly in the API:
 - **`targetRef`** - a stable reference returned by `observe(...)` for an
   actionable or fillable page element. Refs are tied to the page state that
   produced them. Navigation, route changes, or a major DOM re-render can make
-  old refs stale, so call `observe(...)` again after meaningful page changes.
+  old refs stale, so call `observe(...)` again after meaningful page changes or
+  after a deterministic action whose resulting page state matters to the next
+  decision.
 - **CDP** - the Chrome DevTools Protocol. Chrome, Chromium, Browserbase, and
   other browser providers can expose a CDP endpoint that MagicBrowse can launch
   or attach to.
@@ -152,7 +154,10 @@ if (firstButton) {
 
 Deterministic verbs do not call the LLM. They take the observed target plus
 caller-supplied input and dispatch through the same browser executor used by
-the LLM-driven path.
+the LLM-driven path. A completed deterministic result means the direct action
+ran through that executor; it is not a claim that the intended page state
+changed. Call `observe(...)` again before relying on changed page state, or use
+`act(...)` when the task needs a completion check.
 
 ## Attach To An Existing Browser
 

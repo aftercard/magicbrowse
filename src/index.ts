@@ -206,36 +206,18 @@ export {
   readPageIdentity,
 } from './transport/page-resolver.js';
 export {
-  applyMemoryFillPlan,
-  buildMemoryLlmVisibleProjection,
-  createMemoryFillPlan,
-  requiresDelegatedFillAdapter,
-} from './resolution/memory-fill-plan.js';
-export {
   buildMemoryMatchPrompt,
   matchMemoryTargets,
 } from './resolution/memory-match.js';
 export type {
-  MemoryApplyFieldOutcome,
-  MemoryApplyFillResult,
-  MemoryBrowserFillWriter,
-  MemoryCandidateHandle,
-  MemoryDelegatedFillArtifactReader,
-  MemoryDelegatedFillAssistiveBinding,
-  MemoryDelegatedFillAssistiveResolver,
-  MemoryDelegatedFillAssistiveResolutionInput,
-  MemoryDelegatedFillAssistiveResolutionResult,
-  MemoryFillFieldState,
-  MemoryFillPlan,
-  MemoryObservedTarget,
-  MemoryPlanBlocker,
-  MemoryPlanField,
-  MemoryDelegatedFillExecutionDescriptor,
-  MemoryDelegatedFillFieldWriter,
-  MemoryDelegatedFillTargetDescriptor,
-  MemoryRedactionProfileInstaller,
-  MemoryTargetMatch,
-} from './resolution/memory-fill-plan.js';
+  MagicBrowseMemoryDelegatedArtifactReader as MemoryDelegatedFillArtifactReader,
+  MagicBrowseMemoryDelegatedAssistiveBinding as MemoryDelegatedFillAssistiveBinding,
+  MagicBrowseMemoryDelegatedAssistiveResolver as MemoryDelegatedFillAssistiveResolver,
+  MagicBrowseMemoryDelegatedAssistiveResolutionInput as MemoryDelegatedFillAssistiveResolutionInput,
+  MagicBrowseMemoryDelegatedAssistiveResolutionResult as MemoryDelegatedFillAssistiveResolutionResult,
+  MagicBrowseMemoryDelegatedFieldWriter as MemoryDelegatedFillFieldWriter,
+  MagicBrowseMemoryDelegatedFillTargetDescriptor as MemoryDelegatedFillTargetDescriptor,
+} from './resolution/memory-delegated-fill.js';
 export type {
   MatchMemoryTargetResult,
   MatchMemoryTargetsInput,
