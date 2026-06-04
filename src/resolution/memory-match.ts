@@ -8,7 +8,8 @@ export interface MemoryDescriptorAvailability {
 
 export interface MemoryFieldDescriptor {
   readonly fieldRef: string;
-  readonly fieldName: string;
+  readonly fieldLabel: string;
+  readonly fieldName?: string;
   readonly itemName?: string;
   readonly hint?: string;
   readonly matcherDescriptor: string;
@@ -124,7 +125,7 @@ export interface MemorySafeTargetDescriptor {
 
 export interface MemorySafeFieldDescriptor {
   readonly fieldRef: string;
-  readonly fieldName: string;
+  readonly fieldName?: string;
   readonly itemName?: string;
   readonly hint?: string;
   readonly matcherDescriptor?: string;
@@ -217,7 +218,7 @@ export function buildMemoryMatchPrompt(input: {
     instructions: [
       "Match visible browser fields to allowed Memory descriptors by semantic meaning.",
       "Use only provided targetRef and fieldRef values.",
-      "Use fieldName, itemName, optional non-empty hint, page context, and target labels as matching evidence.",
+      "Use fieldName, itemName, optional non-empty hint, page context, value type, and target labels as matching evidence; fieldName contains the human field label.",
       "Do not infer from fieldName alone when target signals disagree.",
       "Consider required and aria-required signals, validation message text, error summary text, submit failure hints, and task purpose.",
       "Do not invent fields, descriptors, values, targets, or hints.",
@@ -230,7 +231,7 @@ export function buildMemoryMatchPrompt(input: {
       "For split-part typed targets, you may return targetRoleHint only when the role is highly certain, chosen exactly from allowedTargetRoles, and based only on target signals.",
       "Omit targetRoleHint for full fields, uncertain split roles, or when no allowedTargetRoles entry clearly fits.",
       "Descriptors are value-free. Raw values, value handles, policy internals, trust rules, and backend-only data are not provided.",
-      "Return compact output only: do not echo field names, field keys, field types, raw values, value handles, policy internals, explanations, or unused empty fields.",
+      "Return compact output only: do not echo field names, field keys, raw values, value handles, policy internals, explanations, or unused empty fields.",
     ],
     ...(input.host ? { host: input.host } : {}),
     ...(input.page ? { page: sanitizePage(input.page) } : {}),
@@ -321,13 +322,6 @@ function validateMemoryEntry(
   if (!descriptor) {
     return invalid(context.target.ref, "unknown_field_ref");
   }
-  if (
-    typeof raw.fieldName === "string" &&
-    raw.fieldName !== descriptor.fieldName
-  ) {
-    return invalid(context.target.ref, "invalid_model_output");
-  }
-
   const projectionHint = readProjectionHint(raw.projectionHint, descriptor);
   if (projectionHint === false) {
     return invalid(context.target.ref, "invalid_projection_hint");
@@ -341,7 +335,7 @@ function validateMemoryEntry(
     status: "matched",
     targetRef: context.target.ref,
     fieldRef: descriptor.fieldRef,
-    fieldName: descriptor.fieldName,
+    fieldName: descriptorLabel(descriptor),
     confidence: raw.confidence,
     ...(targetRoleHint ? { targetRoleHint } : {}),
     ...(projectionHint ? { projectionHint } : {}),
@@ -540,6 +534,7 @@ function sanitizeDescriptor(
 ): MemorySafeFieldDescriptor {
   const itemName = readString(descriptor.itemName);
   const hint = readString(descriptor.hint);
+  const fieldLabel = descriptorLabel(descriptor);
   const matcherDescriptor = readMatcherDescriptor(descriptor, itemName, hint);
   const subjectRole = readString(descriptor.subjectRole);
   const projectionHints = descriptor.projectionHints?.filter(
@@ -548,7 +543,7 @@ function sanitizeDescriptor(
 
   return {
     fieldRef: descriptor.fieldRef,
-    fieldName: descriptor.fieldName,
+    fieldName: fieldLabel,
     ...(itemName ? { itemName } : {}),
     ...(hint ? { hint } : {}),
     ...(matcherDescriptor ? { matcherDescriptor } : {}),
@@ -578,14 +573,19 @@ function readMatcherDescriptor(
   itemName: string | undefined,
   hint: string | undefined,
 ): string | undefined {
+  const fieldLabel = descriptorLabel(descriptor);
   const matcherDescriptor = readString(descriptor.matcherDescriptor);
-  if (!matcherDescriptor || matcherDescriptor === descriptor.fieldName) {
+  if (!matcherDescriptor || matcherDescriptor === fieldLabel) {
     return undefined;
   }
-  const synthesized = [itemName, descriptor.fieldName, hint]
+  const synthesized = [itemName, fieldLabel, hint]
     .filter((value): value is string => Boolean(value))
     .join(" ");
   return matcherDescriptor === synthesized ? undefined : matcherDescriptor;
+}
+
+function descriptorLabel(descriptor: MemoryFieldDescriptor): string {
+  return descriptor.fieldLabel || descriptor.fieldName || descriptor.fieldRef;
 }
 
 function readProjectionHint(
