@@ -1,6 +1,6 @@
-# @aftercard-ai/magicbrowse
+# @aftercard/magicbrowse
 
-[![npm version](https://img.shields.io/npm/v/@aftercard-ai/magicbrowse)](https://www.npmjs.com/package/@aftercard-ai/magicbrowse) [![License](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue.svg)](THIRD_PARTY_NOTICES.md) [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![npm version](https://img.shields.io/npm/v/@aftercard/magicbrowse)](https://www.npmjs.com/package/@aftercard/magicbrowse) [![License](https://img.shields.io/badge/license-MIT%20%2B%20Apache--2.0-blue.svg)](THIRD_PARTY_NOTICES.md) [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
 Give your AI agent a real browser and a disciplined way to operate it.
 
@@ -62,7 +62,7 @@ explicitly.
 ## Install
 
 ```bash
-npm i @aftercard-ai/magicbrowse
+npm i @aftercard/magicbrowse
 ```
 
 The library is ESM-only and requires Node.js `>=18`.
@@ -70,10 +70,10 @@ The library is ESM-only and requires Node.js `>=18`.
 If you want the operator-facing CLI, install the separate CLI package:
 
 ```bash
-npm i -g @aftercard-ai/magicbrowse-cli@latest
+npm i -g @aftercard/magicbrowse-cli@latest
 ```
 
-`@aftercard-ai/magicbrowse` is the library package for imports. It does not
+`@aftercard/magicbrowse` is the library package for imports. It does not
 install the `magicbrowse` shell command.
 
 ## Quick Start
@@ -87,7 +87,7 @@ import {
   close,
   createDirectLlmAdapter,
   launch,
-} from '@aftercard-ai/magicbrowse';
+} from '@aftercard/magicbrowse';
 
 const llmAdapter = createDirectLlmAdapter({
   provider: 'openrouter',
@@ -135,7 +135,7 @@ Use `observe(...)` when your host application wants to inspect the page before
 choosing a deterministic action.
 
 ```ts
-import { click, launch, observe } from '@aftercard-ai/magicbrowse';
+import { click, launch, observe } from '@aftercard/magicbrowse';
 
 await launch({ url: 'https://example.com', headless: true });
 
@@ -171,7 +171,7 @@ Common CDP sources:
 - any browser runtime that gives you a CDP WebSocket endpoint.
 
 ```ts
-import { attach, observe } from '@aftercard-ai/magicbrowse';
+import { attach, observe } from '@aftercard/magicbrowse';
 
 const session = await attach({
   cdpUrl: 'ws://127.0.0.1:9222/devtools/browser/browser-id',
@@ -190,7 +190,7 @@ MagicBrowse can create or attach to Browserbase sessions when the host provides
 Browserbase credentials in the process environment.
 
 ```ts
-import { launch } from '@aftercard-ai/magicbrowse';
+import { launch } from '@aftercard/magicbrowse';
 
 await launch({
   cloud: true,
@@ -311,10 +311,10 @@ These boundaries are part of the runtime contract, not only prompt wording.
 
 ## CLI
 
-The CLI lives in `@aftercard-ai/magicbrowse-cli`.
+The CLI lives in `@aftercard/magicbrowse-cli`.
 
 ```bash
-npm i -g @aftercard-ai/magicbrowse-cli@latest
+npm i -g @aftercard/magicbrowse-cli@latest
 magicbrowse --help
 ```
 
@@ -355,10 +355,10 @@ details.
 
 ## Documentation
 
-- Public package: <https://www.npmjs.com/package/@aftercard-ai/magicbrowse>
-- Source repository: <https://github.com/aftercardAI/magicbrowse>
-- CLI package: <https://www.npmjs.com/package/@aftercard-ai/magicbrowse-cli>
-- Issues: <https://github.com/aftercardAI/magicbrowse/issues>
+- Public package: <https://www.npmjs.com/package/@aftercard/magicbrowse>
+- Source repository: <https://github.com/aftercard/magicbrowse>
+- CLI package: <https://www.npmjs.com/package/@aftercard/magicbrowse-cli>
+- Issues: <https://github.com/aftercard/magicbrowse/issues>
 
 Vendor adaptation notes live in [`vendor-notes/`](./vendor-notes/) for
 engineers who need to understand the bundled browser/planner internals.

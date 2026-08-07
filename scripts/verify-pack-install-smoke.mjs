@@ -75,7 +75,7 @@ try {
   redactSensitiveText,
   resolveMagicBrowseHome,
   status,
-} from '@aftercard-ai/magicbrowse';
+} from '@aftercard/magicbrowse';
 
 const home = resolveMagicBrowseHome({ env: {}, homeDir: process.env.HOME });
 if (!home.endsWith('/.magicbrowse')) {

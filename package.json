@@ -1,6 +1,6 @@
 {
-  "name": "@aftercard-ai/magicbrowse",
-  "version": "0.0.18",
+  "name": "@aftercard/magicbrowse",
+  "version": "0.0.21",
   "type": "module",
   "description": "LLM-first browser-automation runtime: planner + navigator agents driving Chrome over CDP",
   "license": "MIT AND Apache-2.0",
@@ -16,12 +16,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aftercardAI/magicbrowse.git"
+    "url": "git+https://github.com/aftercard/magicbrowse.git"
   },
   "bugs": {
-    "url": "https://github.com/aftercardAI/magicbrowse/issues"
+    "url": "https://github.com/aftercard/magicbrowse/issues"
   },
-  "homepage": "https://github.com/aftercardAI/magicbrowse#readme",
+  "homepage": "https://github.com/aftercard/magicbrowse#readme",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

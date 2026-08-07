@@ -1,4 +1,4 @@
-// Public API for @aftercard-ai/magicbrowse.
+// Public API for @aftercard/magicbrowse.
 
 import type {
   MagicBrowseActOptions,
