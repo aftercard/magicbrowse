@@ -10,10 +10,7 @@ export type MagicBrowseSemanticConfidence = 'high' | 'medium' | 'low';
 
 export type MagicBrowseSemanticValueType = 'text' | 'email' | 'date' | 'secret';
 
-export type MagicBrowseSemanticCandidateSource =
-  | 'memory'
-  | 'session_memory_value'
-  | 'resolver';
+export type MagicBrowseSemanticCandidateSource = 'memory' | 'session_memory_value' | 'resolver';
 
 export type MagicBrowseSemanticApplicability =
   | { readonly target: 'global' }
@@ -27,9 +24,7 @@ export type MagicBrowseMemorySemanticValueHint =
   | 'date_of_birth.month'
   | 'date_of_birth.year';
 
-export type MagicBrowsePhoneValueHint =
-  | 'phone.country_calling_code'
-  | 'phone.national_number';
+export type MagicBrowsePhoneValueHint = 'phone.country_calling_code' | 'phone.national_number';
 
 export type MagicBrowseSemanticValueHint =
   | MagicBrowseMemorySemanticValueHint
@@ -44,8 +39,34 @@ export type MagicBrowseSemanticNoMatchReason =
   | 'invalid_model_output'
   | 'matcher_unavailable';
 
+/**
+ * Sibling choices of one control, carried on every member of the group.
+ *
+ * A page can express a single choice as separate radios or buttons — a coffee
+ * count rendered as `1`, `3`, `5` — and each arrives as its own target. Sent to
+ * the matcher unrelated, three targets labelled with bare numbers describe
+ * nothing, and the only honest reading is three unknown fields: that is exactly
+ * what produced a request asking someone to type `1` into a field named `1`,
+ * with all three marked required and therefore unsatisfiable.
+ *
+ * Grouping is structural and read from the DOM. What the group means, and
+ * whether the task needs it at all, stays the matcher's decision.
+ */
+export interface MagicBrowseTargetOptionGroup {
+  /** Shared identity of the choice, e.g. the radio `name`. */
+  readonly key: string;
+  readonly options: readonly MagicBrowseTargetOptionGroupMember[];
+}
+
+export interface MagicBrowseTargetOptionGroupMember {
+  readonly ref: string;
+  readonly label?: string;
+  readonly selected?: boolean;
+}
+
 export interface MagicBrowseSemanticTargetDescriptor {
   readonly ref: string;
+  readonly optionGroup?: MagicBrowseTargetOptionGroup;
   readonly index?: number;
   readonly selectorMapIndex?: number;
   readonly pageRef?: string;
@@ -62,6 +83,17 @@ export interface MagicBrowseSemanticTargetDescriptor {
   readonly selectorRoot?: string;
   readonly isReadonly?: boolean;
   readonly popupBacked?: boolean;
+  readonly controlKind?: 'select' | 'radio' | 'checkbox' | 'toggle';
+  readonly options?: readonly {
+    readonly value: string;
+    readonly text: string;
+    readonly disabled?: boolean;
+    readonly bindingKey?: string;
+    readonly targetRef?: string;
+    readonly fallbackTargetRef?: string;
+    readonly checked?: boolean;
+  }[];
+  readonly checked?: boolean;
   readonly allowedActions?: readonly string[];
   readonly host?: string;
   readonly context?: unknown;
@@ -244,7 +276,10 @@ export const MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA = {
         type: 'object',
         additionalProperties: false,
         properties: {
-          status: { type: 'string', enum: ['matched', 'needs_resolution', 'ambiguous', 'no_match'] },
+          status: {
+            type: 'string',
+            enum: ['matched', 'needs_resolution', 'ambiguous', 'no_match'],
+          },
           targetRef: { type: 'string' },
           candidateRef: { type: 'string' },
           fieldKey: { type: 'string' },
@@ -288,7 +323,10 @@ export const MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA = {
           groupRef: { type: 'string' },
           pageRef: { type: 'string' },
           scopeRef: { type: 'string' },
-          purpose: { type: 'string', enum: ['login', 'identity', 'payment_card'] },
+          purpose: {
+            type: 'string',
+            enum: ['login', 'identity', 'payment_card'],
+          },
           confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
           fields: {
             type: 'array',
@@ -306,15 +344,7 @@ export const MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA = {
             },
           },
         },
-        required: [
-          'fillRef',
-          'groupRef',
-          'pageRef',
-          'scopeRef',
-          'purpose',
-          'confidence',
-          'fields',
-        ],
+        required: ['fillRef', 'groupRef', 'pageRef', 'scopeRef', 'purpose', 'confidence', 'fields'],
       },
     },
   },
@@ -350,9 +380,7 @@ export async function matchSemanticTargets(
     modelOutput = await input.model.decide(request);
   } catch {
     return {
-      fieldResults: input.targets.map((target) =>
-        noFieldMatch(target.ref, 'matcher_unavailable')
-      ),
+      fieldResults: input.targets.map((target) => noFieldMatch(target.ref, 'matcher_unavailable')),
       groups: [],
       rejectedGroups: [],
       failureReason: 'matcher_unavailable',
@@ -413,8 +441,18 @@ export function memoryFillSemanticSchemas(): readonly MagicBrowseSemanticSchemaD
       schemaRef: 'login.basic',
       purpose: 'login',
       fields: [
-        { fieldKey: 'username', label: 'Username or account email', type: 'text', required: true },
-        { fieldKey: 'password', label: 'Password', type: 'secret', required: true },
+        {
+          fieldKey: 'username',
+          label: 'Username or account email',
+          type: 'text',
+          required: true,
+        },
+        {
+          fieldKey: 'password',
+          label: 'Password',
+          type: 'secret',
+          required: true,
+        },
       ],
     },
     {
@@ -428,21 +466,24 @@ export function memoryFillSemanticSchemas(): readonly MagicBrowseSemanticSchemaD
           required: true,
           valueHints: ['direct', 'full_name.given', 'full_name.family'],
         },
-        { fieldKey: 'document_number', label: 'Identity document number', type: 'secret' },
+        {
+          fieldKey: 'document_number',
+          label: 'Identity document number',
+          type: 'secret',
+        },
         {
           fieldKey: 'date_of_birth',
           label: 'Date of birth',
           type: 'date',
-          valueHints: [
-            'direct',
-            'date_of_birth.day',
-            'date_of_birth.month',
-            'date_of_birth.year',
-          ],
+          valueHints: ['direct', 'date_of_birth.day', 'date_of_birth.month', 'date_of_birth.year'],
         },
         { fieldKey: 'nationality', label: 'Nationality', type: 'text' },
         { fieldKey: 'issue_date', label: 'Document issue date', type: 'date' },
-        { fieldKey: 'expiry_date', label: 'Document expiry date', type: 'date' },
+        {
+          fieldKey: 'expiry_date',
+          label: 'Document expiry date',
+          type: 'date',
+        },
         { fieldKey: 'issuing_country', label: 'Issuing country', type: 'text' },
       ],
     },
@@ -451,9 +492,24 @@ export function memoryFillSemanticSchemas(): readonly MagicBrowseSemanticSchemaD
       purpose: 'payment_card',
       fields: [
         { fieldKey: 'cardholder', label: 'Cardholder name', type: 'text' },
-        { fieldKey: 'pan', label: 'Card number', type: 'secret', required: true },
-        { fieldKey: 'exp_month', label: 'Card expiry month', type: 'text', required: true },
-        { fieldKey: 'exp_year', label: 'Card expiry year', type: 'text', required: true },
+        {
+          fieldKey: 'pan',
+          label: 'Card number',
+          type: 'secret',
+          required: true,
+        },
+        {
+          fieldKey: 'exp_month',
+          label: 'Card expiry month',
+          type: 'text',
+          required: true,
+        },
+        {
+          fieldKey: 'exp_year',
+          label: 'Card expiry year',
+          type: 'text',
+          required: true,
+        },
         { fieldKey: 'cvv', label: 'Card security code', type: 'secret' },
       ],
     },
@@ -472,10 +528,7 @@ export function memoryFieldSemanticSchema(
         type: candidate.type,
         ...(candidate.fieldKey === 'phone'
           ? {
-              valueHints: [
-                'phone.country_calling_code',
-                'phone.national_number',
-              ],
+              valueHints: ['phone.country_calling_code', 'phone.national_number'],
             }
           : {}),
       });
@@ -516,12 +569,15 @@ function validateSemanticMatcherOutput(
   }
 
   const fieldResults = context.targets.map((target) =>
-    validateFieldEntry(rawFieldEntries.find((entry) => entry.targetRef === target.ref), {
-      target,
-      candidateByRef,
-      schemaByPurpose,
-      memoryFillTargetRefs: context.memoryFillTargetRefs,
-    })
+    validateFieldEntry(
+      rawFieldEntries.find((entry) => entry.targetRef === target.ref),
+      {
+        target,
+        candidateByRef,
+        schemaByPurpose,
+        memoryFillTargetRefs: context.memoryFillTargetRefs,
+      }
+    )
   );
 
   const groups: MagicBrowseSemanticGroupResult[] = [];
@@ -627,19 +683,19 @@ function validateFieldEntry(
     }
     return {
       status: 'needs_resolution',
+      targetRef: context.target.ref,
+      candidateRef: candidate.candidateRef,
+      fieldKey: candidate.fieldKey,
+      ...(valueHint ? { valueHint } : {}),
+      confidence: raw.confidence,
+      plan: {
         targetRef: context.target.ref,
         candidateRef: candidate.candidateRef,
         fieldKey: candidate.fieldKey,
         ...(valueHint ? { valueHint } : {}),
-        confidence: raw.confidence,
-        plan: {
-          targetRef: context.target.ref,
-          candidateRef: candidate.candidateRef,
-          fieldKey: candidate.fieldKey,
-          ...(valueHint ? { valueHint } : {}),
-          type: candidate.type,
-          resolve: candidate.resolve,
-        },
+        type: candidate.type,
+        resolve: candidate.resolve,
+      },
     };
   }
 
@@ -687,8 +743,14 @@ function validateAmbiguousField(
 }
 
 type GroupValidationOutcome =
-  | { readonly status: 'accepted'; readonly group: MagicBrowseSemanticGroupResult }
-  | { readonly status: 'rejected'; readonly group: MagicBrowseSemanticRejectedGroup };
+  | {
+      readonly status: 'accepted';
+      readonly group: MagicBrowseSemanticGroupResult;
+    }
+  | {
+      readonly status: 'rejected';
+      readonly group: MagicBrowseSemanticRejectedGroup;
+    };
 
 function validateGroupEntry(
   raw: RawRecord,
@@ -800,8 +862,14 @@ function validateGroupField(
     readonly targetByRef: ReadonlyMap<string, MagicBrowseSemanticTargetDescriptor>;
   }
 ):
-  | { readonly status: 'accepted'; readonly field: MagicBrowseSemanticGroupField }
-  | { readonly status: 'rejected'; readonly field: MagicBrowseSemanticRejectedGroupField } {
+  | {
+      readonly status: 'accepted';
+      readonly field: MagicBrowseSemanticGroupField;
+    }
+  | {
+      readonly status: 'rejected';
+      readonly field: MagicBrowseSemanticRejectedGroupField;
+    } {
   const record = asRecord(raw);
   if (!record || typeof record.targetRef !== 'string' || typeof record.fieldKey !== 'string') {
     return {
@@ -1120,7 +1188,6 @@ function readNoMatchReason(value: unknown): MagicBrowseSemanticNoMatchReason {
     case 'unknown_candidate_ref':
     case 'matcher_unavailable':
       return value;
-    case 'invalid_model_output':
     default:
       return 'invalid_model_output';
   }

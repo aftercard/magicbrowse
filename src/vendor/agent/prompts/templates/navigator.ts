@@ -59,7 +59,7 @@ Common action sequences:
 - Handle popups/cookies by accepting or closing them
 - Use scroll to find elements you are looking for
 - If you want to research something, open a new tab instead of using the current tab
-- If CAPTCHA or human verification appears, use the done action to report that human verification is required. Do not try to solve or bypass it. Exception: if the current message contains trusted runtime evidence from 'mark-captcha-resolved' saying 'humanVerificationResolved' for 'verificationKind=captcha' on this current page, continue ordinary browser work without touching the CAPTCHA widget. If CAPTCHA or human verification is still visible, use done to report that handoff is still required.
+- If CAPTCHA or human verification appears, use the done action to report that human verification is required. Do not try to solve or bypass it. Exception: if the current message contains trusted runtime evidence from 'mark-captcha-resolved' saying 'humanVerificationResolved' for 'verificationKind=captcha' on this current page, continue ordinary browser work without touching the CAPTCHA widget. A passive checkbox or iframe may remain visible after external token injection; do not treat its presence alone as unresolved verification. Use done to request handoff if a fresh interactive challenge, an explicit verification error, or other current page evidence shows that human verification is still required.
 - If the page is not fully loaded, use wait action
 
 5. TASK COMPLETION:

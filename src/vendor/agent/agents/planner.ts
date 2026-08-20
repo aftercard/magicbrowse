@@ -9,10 +9,12 @@ import {
   ChatModelAuthError,
   ChatModelBadRequestError,
   ChatModelForbiddenError,
+  ChatModelPaymentError,
   isAbortedError,
   isAuthenticationError,
   isBadRequestError,
   isForbiddenError,
+  isProviderPaymentError,
   LLM_FORBIDDEN_ERROR_MESSAGE,
   RequestCancelledError,
   ResponseParseError,
@@ -198,7 +200,9 @@ export class PlannerAgent extends BaseAgent<typeof plannerOutputSchema, PlannerO
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      if (isAuthenticationError(error)) {
+      if (isProviderPaymentError(error)) {
+        throw new ChatModelPaymentError(errorMessage, error);
+      } else if (isAuthenticationError(error)) {
         throw new ChatModelAuthError(errorMessage, error);
       } else if (isBadRequestError(error)) {
         throw new ChatModelBadRequestError(errorMessage, error);

@@ -12,6 +12,7 @@ import {
   ChatModelAuthError,
   ChatModelBadRequestError,
   ChatModelForbiddenError,
+  ChatModelPaymentError,
   EXTENSION_CONFLICT_ERROR_MESSAGE,
   ExtensionConflictError,
   isAbortedError,
@@ -19,8 +20,10 @@ import {
   isBadRequestError,
   isExtensionConflictError,
   isForbiddenError,
+  isProviderPaymentError,
   ResponseParseError,
   LLM_FORBIDDEN_ERROR_MESSAGE,
+  RepeatedStaleTargetError,
   RequestCancelledError,
 } from './errors.js';
 import { calcBranchPathHashSet, type DOMElementNode } from '../../browser/dom/views.js';
@@ -29,6 +32,19 @@ import { convertZodToJsonSchema, repairJsonString } from '../../utils.js';
 import { HistoryTreeProcessor } from '../../browser/dom/history/service.js';
 import { AgentStepRecord } from '../history.js';
 import { type DOMHistoryElement } from '../../browser/dom/history/view.js';
+import {
+  isBrowserActionDeadlineError,
+  runWithBrowserActionDeadline,
+  waitForAbortableDelay,
+} from '../../../runtime/browser-action-deadline.js';
+import {
+  createTargetObservationLease,
+  validateTargetObservationLease,
+} from '../../../resolution/target-observation-lease.js';
+import {
+  createActionTargetDescriptor,
+  createMemoryFieldTargetDescriptor,
+} from '../../../resolution/targets.js';
 
 const logger = createLogger('NavigatorAgent');
 
@@ -47,6 +63,37 @@ interface ParsedModelOutput {
     next_goal?: string;
   };
   action?: (Record<string, unknown> | null)[] | null;
+}
+
+type BrowserActionAttemptResult =
+  | {
+      readonly status: 'completed';
+      readonly result: ActionResult;
+      readonly indexArg: number | null;
+    }
+  | {
+      readonly status: 'sequence_stopped';
+      readonly result: ActionResult;
+    };
+
+interface StaleTargetRefusal {
+  readonly key: string;
+  readonly count: number;
+}
+
+type IndexedTargetCheck =
+  | { readonly status: 'matched' }
+  | {
+      readonly status: 'stale';
+      readonly message: string;
+      readonly refusalKey: string | null;
+    };
+
+class StaleTargetRefusalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StaleTargetRefusalError';
+  }
 }
 
 interface ActionabilitySignature {
@@ -146,6 +193,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
   private actionRegistry: NavigatorActionRegistry;
   private jsonSchema: Record<string, unknown>;
   private _stateHistory: BrowserStateHistory | null = null;
+  private staleTargetRefusal: StaleTargetRefusal | null = null;
 
   constructor(
     actionRegistry: NavigatorActionRegistry,
@@ -246,6 +294,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     let actionResults: ActionResult[] = [];
 
     try {
+      this.context.controller.signal.throwIfAborted();
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_START, 'Navigating...');
       this.context.lastNavigatorActionNames = [];
       this.context.lastNavigatorPreviousPageIdentity = null;
@@ -254,7 +303,9 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       // Observation phase — DOM scene capture via buildDomTree.
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OBSERVE_START, 'Capturing page state');
       await this.addStateMessageToMemory();
+      this.context.controller.signal.throwIfAborted();
       const currentState = await this.context.browserContext.getCachedState();
+      this.context.controller.signal.throwIfAborted();
       this.context.lastNavigatorPreviousPageIdentity = {
         url: currentState.url,
         title: currentState.title,
@@ -280,6 +331,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
         debugWrite(`[state-dump] step=${this.context.nSteps}, last message:\n---\n${content}\n---`);
       }
       const modelOutput = await this.invoke(inputMessages);
+      this.context.controller.signal.throwIfAborted();
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_THINK_OK,
         `${modelOutput.action?.length ?? 0} action(s)`);
 
@@ -306,6 +358,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
 
       // take the actions
       actionResults = await this.doMultiAction(actions, currentState);
+      this.context.controller.signal.throwIfAborted();
       // logger.info('Action results', JSON.stringify(actionResults, null, 2));
 
       this.context.actionResults = actionResults;
@@ -327,10 +380,16 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       this.removeLastStateMessageFromMemory();
       const errorMessage = error instanceof Error ? error.message : String(error);
       // Check if this is an authentication error
-      if (isAuthenticationError(error)) {
+      if (error instanceof RepeatedStaleTargetError) {
+        throw error;
+      } else if (isProviderPaymentError(error)) {
+        throw new ChatModelPaymentError(errorMessage, error);
+      } else if (isAuthenticationError(error)) {
         throw new ChatModelAuthError(errorMessage, error);
       } else if (isBadRequestError(error)) {
         throw new ChatModelBadRequestError(errorMessage, error);
+      } else if (isBrowserActionDeadlineError(error)) {
+        throw error;
       } else if (isAbortedError(error)) {
         throw new RequestCancelledError(errorMessage);
       } else if (isExtensionConflictError(error)) {
@@ -481,7 +540,12 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     logger.info('Actions', actions);
 
     const browserContext = this.context.browserContext;
+    if (actions.length === 0) {
+      this.resetStaleTargetRefusal();
+    }
+    this.context.controller.signal.throwIfAborted();
     const cachedPathHashes = await calcBranchPathHashSet(observedBrowserState);
+    this.context.controller.signal.throwIfAborted();
     if (isDebug()) {
       debugWrite(
         `[action-sequence.start] step=${this.context.nSteps} actionCount=${actions.length} ` +
@@ -491,11 +555,13 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     }
 
     await browserContext.removeHighlight();
+    this.context.controller.signal.throwIfAborted();
 
     for (const [i, action] of actions.entries()) {
       const actionName = Object.keys(action)[0];
       const actionArgs = action[actionName];
       try {
+        this.context.controller.signal.throwIfAborted();
         // check if the task is paused or stopped
         if (this.context.paused || this.context.stopped) {
           return results;
@@ -516,77 +582,22 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
             plannedElement: this.debugSummarizeElement(plannedElement),
           });
         }
-        let currentStateForAction: BrowserState | null = null;
-        if (indexArg !== null) {
-          currentStateForAction = await browserContext.getState(this.context.options.useVision);
+        const attempt = await this.executeActionAttempt({
+          actionInstance,
+          actionName,
+          actionArgs,
+          actionIndex: i,
+          actionCount: actions.length,
+          indexArg,
+          observedBrowserState,
+          cachedPathHashes,
+        });
+        this.context.controller.signal.throwIfAborted();
+        if (attempt.status === 'sequence_stopped') {
+          results.push(attempt.result);
+          break;
         }
-        if (i > 0 && indexArg !== null) {
-          const newState = currentStateForAction ?? await browserContext.getState(this.context.options.useVision);
-          const newPathHashes = await calcBranchPathHashSet(newState);
-          if (isDebug()) {
-            debugJson(`[action.preflight] step=${this.context.nSteps} action=${i + 1}/${actions.length}`, {
-              name: actionName,
-              index: indexArg,
-              currentSelectorCount: newState.selectorMap.size,
-              currentElement: this.debugSummarizeElement(newState.selectorMap.get(indexArg) ?? null),
-            });
-          }
-          const observedElement = observedBrowserState.selectorMap.get(indexArg) ?? null;
-          const currentElement = newState.selectorMap.get(indexArg) ?? null;
-          if (this.indexedActionabilityChanged(observedElement, currentElement)) {
-            logger.info(ACTIONABILITY_CHANGED_MESSAGE);
-            if (isDebug()) {
-              debugWrite(
-                `[action.sequence-stop] step=${this.context.nSteps} reason=${ACTIONABILITY_CHANGED_MESSAGE}`,
-              );
-              debugJson(`[action.actionability-signature] step=${this.context.nSteps}`, {
-                observed: observedElement ? this.actionabilitySignature(observedElement) : null,
-                current: currentElement ? this.actionabilitySignature(currentElement) : null,
-              });
-              this.debugWriteStateSnapshot(`sequence-stop-after-actionability-change`, newState);
-            }
-            results.push(
-              new ActionResult({
-                extractedContent: ACTIONABILITY_CHANGED_MESSAGE,
-                includeInMemory: true,
-              }),
-            );
-            break;
-          }
-          // next action requires index but there are new elements on the page
-          // ES2025 Set.isSubsetOf — replaced with manual check for older lib targets
-          let isSubset = true;
-          for (const h of newPathHashes) {
-            if (!cachedPathHashes.has(h)) { isSubset = false; break; }
-          }
-          if (!isSubset) {
-            const msg = `Something new appeared after action ${i} / ${actions.length}`;
-            logger.info(msg);
-            if (isDebug()) {
-              debugWrite(`[action.sequence-stop] step=${this.context.nSteps} reason=${msg}`);
-              this.debugWriteStateSnapshot(`sequence-stop-after-new-elements`, newState);
-            }
-            results.push(
-              new ActionResult({
-                extractedContent: msg,
-                includeInMemory: true,
-              }),
-            );
-            break;
-          }
-        }
-        if (indexArg !== null && currentStateForAction) {
-          await this.assertIndexedActionTargetStillMatchesObservedState(
-            indexArg,
-            observedBrowserState,
-            currentStateForAction,
-          );
-        }
-
-        const result = await actionInstance.call(actionArgs);
-        if (result === undefined) {
-          throw new Error(`Action ${actionName} returned undefined`);
-        }
+        const { result } = attempt;
         if (isDebug()) {
           debugJson(`[action.result] step=${this.context.nSteps} action=${i + 1}/${actions.length}`, {
             name: actionName,
@@ -598,6 +609,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
             error: result.error,
           });
           await this.debugWritePostActionState(actionName, i + 1, actions.length);
+          this.context.controller.signal.throwIfAborted();
         }
 
         // if the action has an index argument, record the interacted element to the result
@@ -623,6 +635,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
               `[action.sequence-stop] step=${this.context.nSteps} reason=native_select_mutation_boundary`,
             );
             await this.debugWritePostActionState('native-select-mutation-boundary', i + 1, actions.length);
+            this.context.controller.signal.throwIfAborted();
           }
           results.push(
             new ActionResult({
@@ -638,8 +651,14 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           return results;
         }
         // TODO: wait for 1 second for now, need to optimize this to avoid unnecessary waiting
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await waitForAbortableDelay(1000, this.context.controller.signal);
       } catch (error) {
+        if (error instanceof RepeatedStaleTargetError) {
+          throw error;
+        }
+        if (!(error instanceof StaleTargetRefusalError)) {
+          this.resetStaleTargetRefusal();
+        }
         if (error instanceof URLNotAllowedError) {
           throw error;
         }
@@ -651,7 +670,12 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           JSON.stringify(errorMessage, null, 2),
         );
         // unexpected error, emit event
-        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMessage);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMessage, {
+          actionName,
+        });
+        if (isBrowserActionDeadlineError(error)) {
+          throw error;
+        }
         if (isDebug()) {
           debugJson(`[action.error] step=${this.context.nSteps} action=${i + 1}/${actions.length}`, {
             name: actionName,
@@ -676,6 +700,129 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     return results;
   }
 
+  private async executeActionAttempt(input: {
+    readonly actionInstance: Action;
+    readonly actionName: string;
+    readonly actionArgs: unknown;
+    readonly actionIndex: number;
+    readonly actionCount: number;
+    readonly indexArg: number | null;
+    readonly observedBrowserState: BrowserState;
+    readonly cachedPathHashes: ReadonlySet<string>;
+  }): Promise<BrowserActionAttemptResult> {
+    const execute = async (signal?: AbortSignal): Promise<BrowserActionAttemptResult> => {
+      signal?.throwIfAborted();
+      let currentStateForAction: BrowserState | null = null;
+      if (input.indexArg !== null) {
+        currentStateForAction = await this.context.browserContext.getState(
+          this.context.options.useVision
+        );
+        signal?.throwIfAborted();
+      }
+      if (input.actionIndex > 0 && input.indexArg !== null) {
+        const newState =
+          currentStateForAction ??
+          (await this.context.browserContext.getState(this.context.options.useVision));
+        signal?.throwIfAborted();
+        const newPathHashes = await calcBranchPathHashSet(newState);
+        if (isDebug()) {
+          debugJson(
+            `[action.preflight] step=${this.context.nSteps} action=${input.actionIndex + 1}/${input.actionCount}`,
+            {
+              name: input.actionName,
+              index: input.indexArg,
+              currentSelectorCount: newState.selectorMap.size,
+              currentElement: this.debugSummarizeElement(
+                newState.selectorMap.get(input.indexArg) ?? null
+              ),
+            }
+          );
+        }
+        const observedElement =
+          input.observedBrowserState.selectorMap.get(input.indexArg) ?? null;
+        const currentElement = newState.selectorMap.get(input.indexArg) ?? null;
+        if (this.indexedActionabilityChanged(observedElement, currentElement)) {
+          this.resetStaleTargetRefusal();
+          logger.info(ACTIONABILITY_CHANGED_MESSAGE);
+          if (isDebug()) {
+            debugWrite(
+              `[action.sequence-stop] step=${this.context.nSteps} reason=${ACTIONABILITY_CHANGED_MESSAGE}`
+            );
+            debugJson(`[action.actionability-signature] step=${this.context.nSteps}`, {
+              observed: observedElement ? this.actionabilitySignature(observedElement) : null,
+              current: currentElement ? this.actionabilitySignature(currentElement) : null,
+            });
+            this.debugWriteStateSnapshot('sequence-stop-after-actionability-change', newState);
+          }
+          return {
+            status: 'sequence_stopped',
+            result: new ActionResult({
+              extractedContent: ACTIONABILITY_CHANGED_MESSAGE,
+              includeInMemory: true,
+            }),
+          };
+        }
+
+        for (const hash of newPathHashes) {
+          if (!input.cachedPathHashes.has(hash)) {
+            this.resetStaleTargetRefusal();
+            const message = `Something new appeared after action ${input.actionIndex} / ${input.actionCount}`;
+            logger.info(message);
+            if (isDebug()) {
+              debugWrite(
+                `[action.sequence-stop] step=${this.context.nSteps} reason=${message}`
+              );
+              this.debugWriteStateSnapshot('sequence-stop-after-new-elements', newState);
+            }
+            return {
+              status: 'sequence_stopped',
+              result: new ActionResult({
+                extractedContent: message,
+                includeInMemory: true,
+              }),
+            };
+          }
+        }
+      }
+      if (input.indexArg !== null && currentStateForAction) {
+        const targetCheck = await this.checkIndexedActionTargetStillMatchesObservedState(
+          input.indexArg,
+          input.actionName,
+          input.observedBrowserState,
+          currentStateForAction
+        );
+        if (targetCheck.status === 'stale') {
+          if (this.recordStaleTargetRefusal(targetCheck.refusalKey)) {
+            throw new RepeatedStaleTargetError();
+          }
+          throw new StaleTargetRefusalError(targetCheck.message);
+        }
+        this.resetStaleTargetRefusal();
+        signal?.throwIfAborted();
+      } else {
+        this.resetStaleTargetRefusal();
+      }
+
+      const result = await input.actionInstance.call(input.actionArgs);
+      signal?.throwIfAborted();
+      if (result === undefined) {
+        throw new Error(`Action ${input.actionName} returned undefined`);
+      }
+      return { status: 'completed', result, indexArg: input.indexArg };
+    };
+
+    if (input.actionInstance.deadlinePolicy === 'none') {
+      return execute(this.context.controller.signal);
+    }
+
+    return runWithBrowserActionDeadline(execute, {
+      actionName: input.actionName,
+      timeoutMs: this.context.options.browserActionTimeoutMs,
+      signal: this.context.controller.signal,
+      cancel: (error) => this.context.cancelPendingBrowserOperations(error),
+    });
+  }
+
   private hasRemainingIndexedActions(actions: readonly Record<string, unknown>[], currentIndex: number): boolean {
     for (const action of actions.slice(currentIndex + 1)) {
       const actionName = Object.keys(action)[0];
@@ -693,19 +840,28 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     return false;
   }
 
-  private async assertIndexedActionTargetStillMatchesObservedState(
+  private async checkIndexedActionTargetStillMatchesObservedState(
     index: number,
+    actionName: string,
     observedState: BrowserState,
     currentState: BrowserState,
-  ): Promise<void> {
+  ): Promise<IndexedTargetCheck> {
     const observedElement = observedState.selectorMap.get(index);
     if (!observedElement) {
-      throw new Error(`Element ${index} did not exist in observed browser state`);
+      return {
+        status: 'stale',
+        message: `Element ${index} did not exist in observed browser state`,
+        refusalKey: null,
+      };
     }
 
     const currentElement = currentState.selectorMap.get(index);
     if (!currentElement) {
-      throw new Error(`Element ${index} no longer exists`);
+      return {
+        status: 'stale',
+        message: `Element ${index} no longer exists`,
+        refusalKey: this.physicalTargetRefusalKey(observedState, actionName, observedElement),
+      };
     }
 
     const observedHistoryElement = HistoryTreeProcessor.convertDomElementToHistoryElement(observedElement);
@@ -714,8 +870,100 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       currentElement,
     );
     if (!isSameTarget) {
-      throw new Error(`Element ${index} no longer matches the observed target`);
+      return {
+        status: 'stale',
+        message: `Element ${index} no longer matches the observed target`,
+        refusalKey: this.physicalTargetRefusalKey(observedState, actionName, observedElement),
+      };
     }
+    const action = navigatorLeaseAction(actionName);
+    if (action) {
+      const observedDescriptor =
+        action === 'click'
+          ? createActionTargetDescriptor({ state: observedState, element: observedElement, selectorMapIndex: index })
+          : createMemoryFieldTargetDescriptor({ state: observedState, element: observedElement, selectorMapIndex: index });
+      const currentDescriptor =
+        action === 'click'
+          ? createActionTargetDescriptor({ state: currentState, element: currentElement, selectorMapIndex: index })
+          : createMemoryFieldTargetDescriptor({ state: currentState, element: currentElement, selectorMapIndex: index });
+      const lease = observedDescriptor
+        ? createTargetObservationLease({
+            state: observedState,
+            element: observedElement,
+            descriptor: observedDescriptor,
+            action,
+            observationRef: `navigator:${this.context.nSteps}`,
+          })
+        : undefined;
+      const frame = lease
+        ? currentState.formMutationFrames?.find(
+            (candidate) => candidate.checkpoint?.documentRef === lease.documentRef,
+          )
+        : undefined;
+      const validation =
+        lease && currentDescriptor
+          ? validateTargetObservationLease({
+              lease,
+              currentElement,
+              currentDescriptor,
+              action,
+              mutationWindow:
+                frame?.checkpoint && !frame.missing
+                  ? {
+                      checkpoint: frame.checkpoint,
+                      summaries: frame.summaries,
+                      coverageAvailable: frame.coverageAvailable,
+                    }
+                  : undefined,
+            })
+          : { status: 'blocked' as const, cause: 'mutation_history_unavailable' as const };
+      if (validation.status === 'blocked') {
+        return {
+          status: 'stale',
+          message: `Element ${index} mutation authority expired; re-observe before acting`,
+          refusalKey: this.physicalTargetRefusalKey(observedState, actionName, observedElement),
+        };
+      }
+    }
+    return { status: 'matched' };
+  }
+
+  private physicalTargetRefusalKey(
+    state: BrowserState,
+    actionName: string,
+    element: DOMElementNode,
+  ): string | null {
+    const nodeIds: string[] = [];
+    let current: DOMElementNode | null = element;
+    while (current) {
+      const nodeId = current.internalNodeId?.trim();
+      if (!nodeId) {
+        return null;
+      }
+      nodeIds.unshift(nodeId);
+      current = current.parent;
+    }
+    return JSON.stringify([state.tabId, state.url, actionName, nodeIds]);
+  }
+
+  private recordStaleTargetRefusal(refusalKey: string | null): boolean {
+    if (refusalKey === null) {
+      this.resetStaleTargetRefusal();
+      return false;
+    }
+
+    if (this.staleTargetRefusal?.key !== refusalKey) {
+      this.staleTargetRefusal = { key: refusalKey, count: 1 };
+      return false;
+    }
+
+    const count = this.staleTargetRefusal.count + 1;
+    this.staleTargetRefusal = { key: refusalKey, count };
+    return count >= 2;
+  }
+
+  private resetStaleTargetRefusal(): void {
+    this.staleTargetRefusal = null;
   }
 
   private indexedActionabilityChanged(
@@ -1021,4 +1269,13 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
 
     return action;
   }
+}
+
+function navigatorLeaseAction(
+  actionName: string,
+): 'click' | 'fill' | 'select' | undefined {
+  if (actionName === 'click_element') return 'click';
+  if (actionName === 'input_text') return 'fill';
+  if (actionName === 'select_dropdown_option') return 'select';
+  return undefined;
 }

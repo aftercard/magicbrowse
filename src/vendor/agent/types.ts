@@ -5,9 +5,13 @@ import { DEFAULT_INCLUDE_ATTRIBUTES } from '../browser/dom/views.js';
 import type { DOMHistoryElement } from '../browser/dom/history/view.js';
 import type MessageManager from './messages/service.js';
 import type { EventManager } from './event/manager.js';
-import { type Actors, type EventData, type ExecutionState, AgentEvent } from './event/types.js';
+import { type Actors, type EventData, ExecutionState, AgentEvent } from './event/types.js';
 import { AgentStepHistory } from './history.js';
 import type { MagicBrowseTrustedRuntimeEvidence } from '../../types.js';
+import {
+  BrowserActionDeadlineError,
+  DEFAULT_BROWSER_ACTION_TIMEOUT_MS,
+} from '../../runtime/browser-action-deadline.js';
 
 export type BrowserStateTextProjector = (text: string) => string;
 
@@ -36,6 +40,7 @@ export interface AgentOptions {
   maxSteps: number;
   maxActionsPerStep: number;
   maxFailures: number;
+  browserActionTimeoutMs: number;
   retryDelay: number;
   maxInputTokens: number;
   maxErrorLength: number;
@@ -49,6 +54,7 @@ export const DEFAULT_AGENT_OPTIONS: AgentOptions = {
   maxSteps: 100,
   maxActionsPerStep: 10,
   maxFailures: 3,
+  browserActionTimeoutMs: DEFAULT_BROWSER_ACTION_TIMEOUT_MS,
   retryDelay: 10,
   maxInputTokens: 128000,
   maxErrorLength: 400,
@@ -79,6 +85,8 @@ export class AgentContext {
   finalAnswer: string | null;
   browserStateTextProjector: BrowserStateTextProjector | undefined;
   trustedRuntimeEvidence: readonly MagicBrowseTrustedRuntimeEvidence[];
+  private externalAbortCleanup: (() => void) | undefined = undefined;
+  private pendingBrowserCancellation: Promise<void> | undefined = undefined;
 
   constructor(
     taskId: string,
@@ -88,6 +96,7 @@ export class AgentContext {
     options: Partial<AgentOptions>,
     browserStateTextProjector?: BrowserStateTextProjector,
     trustedRuntimeEvidence: readonly MagicBrowseTrustedRuntimeEvidence[] = [],
+    signal?: AbortSignal,
   ) {
     this.controller = new AbortController();
     this.taskId = taskId;
@@ -110,14 +119,33 @@ export class AgentContext {
     this.finalAnswer = null;
     this.browserStateTextProjector = browserStateTextProjector;
     this.trustedRuntimeEvidence = trustedRuntimeEvidence;
+    if (signal) {
+      const abort = () => {
+        void this.cancelPendingBrowserOperations(signal.reason).catch(() => undefined);
+      };
+      if (signal.aborted) {
+        abort();
+      } else {
+        signal.addEventListener('abort', abort, { once: true });
+        this.externalAbortCleanup = () => signal.removeEventListener('abort', abort);
+      }
+    }
   }
 
   async emitEvent(
     actor: Actors,
     state: ExecutionState,
     eventDetails: string,
-    metadata: Pick<EventData, 'actionName' | 'kind' | 'handoff'> = {},
+    metadata: Pick<EventData, 'actionName' | 'kind' | 'handoff' | 'blockedReason'> = {},
   ) {
+    if (
+      this.controller.signal.aborted &&
+      (state === ExecutionState.ACT_OK ||
+        state === ExecutionState.STEP_OK ||
+        state === ExecutionState.TASK_OK)
+    ) {
+      return;
+    }
     const event = new AgentEvent(actor, state, {
       taskId: this.taskId,
       step: this.nSteps,
@@ -138,7 +166,24 @@ export class AgentContext {
 
   async stop() {
     this.stopped = true;
-    setTimeout(() => this.controller.abort(), 300);
+    await this.cancelPendingBrowserOperations(
+      new BrowserActionDeadlineError('action_cancelled', 'act')
+    );
+  }
+
+  async cancelPendingBrowserOperations(reason?: unknown): Promise<void> {
+    if (!this.controller.signal.aborted) {
+      this.controller.abort(reason);
+    }
+    this.pendingBrowserCancellation ??= Promise.resolve().then(() =>
+      this.browserContext.cancelPendingOperations()
+    );
+    await this.pendingBrowserCancellation;
+  }
+
+  disposeCancellation(): void {
+    this.externalAbortCleanup?.();
+    this.externalAbortCleanup = undefined;
   }
 }
 

@@ -6,12 +6,7 @@ export const BROWSERBASE_PROJECT_ID_ENV_VAR = 'BROWSERBASE_PROJECT_ID';
 export const BROWSERBASE_REGION_ENV_VAR = 'BROWSERBASE_REGION';
 export const BROWSERBASE_TIMEOUT_ENV_VAR = 'BROWSERBASE_TIMEOUT';
 
-export type BrowserbaseSessionStatus =
-  | 'PENDING'
-  | 'RUNNING'
-  | 'ERROR'
-  | 'TIMED_OUT'
-  | 'COMPLETED';
+export type BrowserbaseSessionStatus = 'PENDING' | 'RUNNING' | 'ERROR' | 'TIMED_OUT' | 'COMPLETED';
 
 export interface BrowserbaseSession {
   readonly id: string;
@@ -79,9 +74,14 @@ export function createBrowserbaseClient(options: BrowserbaseClientOptions = {}):
     async getSession(sessionId) {
       const normalizedSessionId = normalizeSessionId(sessionId);
       const session = normalizeBrowserbaseSession(
-        await requestBrowserbaseJson(fetchImpl, config, `/sessions/${encodeURIComponent(normalizedSessionId)}`, {
-          method: 'GET',
-        }),
+        await requestBrowserbaseJson(
+          fetchImpl,
+          config,
+          `/sessions/${encodeURIComponent(normalizedSessionId)}`,
+          {
+            method: 'GET',
+          }
+        ),
         { requireConnectUrl: false }
       );
       return session;
@@ -89,15 +89,20 @@ export function createBrowserbaseClient(options: BrowserbaseClientOptions = {}):
     async releaseSession(input) {
       const sessionId = normalizeSessionId(input.sessionId);
       return normalizeBrowserbaseSession(
-        await requestBrowserbaseJson(fetchImpl, config, `/sessions/${encodeURIComponent(sessionId)}`, {
-          method: 'POST',
-          body: {
-            status: 'REQUEST_RELEASE',
-            ...(input.projectId ?? config.projectId
-              ? { projectId: input.projectId ?? config.projectId }
-              : {}),
-          },
-        }),
+        await requestBrowserbaseJson(
+          fetchImpl,
+          config,
+          `/sessions/${encodeURIComponent(sessionId)}`,
+          {
+            method: 'POST',
+            body: {
+              status: 'REQUEST_RELEASE',
+              ...((input.projectId ?? config.projectId)
+                ? { projectId: input.projectId ?? config.projectId }
+                : {}),
+            },
+          }
+        ),
         { requireConnectUrl: false }
       );
     },
@@ -222,7 +227,9 @@ function readTimeout(value: string | undefined): number | undefined {
 
   const parsed = Number(trimmed);
   if (!Number.isInteger(parsed) || parsed < 60 || parsed > 21600) {
-    throw new Error(`${BROWSERBASE_TIMEOUT_ENV_VAR} must be an integer number of seconds from 60 to 21600.`);
+    throw new Error(
+      `${BROWSERBASE_TIMEOUT_ENV_VAR} must be an integer number of seconds from 60 to 21600.`
+    );
   }
   return parsed;
 }

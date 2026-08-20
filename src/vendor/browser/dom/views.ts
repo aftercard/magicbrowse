@@ -9,6 +9,7 @@ export const DEFAULT_INCLUDE_ATTRIBUTES = [
   'title',
   'type',
   'checked',
+  'selected',
   'disabled',
   'readonly',
   'aria-disabled',
@@ -23,6 +24,9 @@ export const DEFAULT_INCLUDE_ATTRIBUTES = [
   'data-state',
   'alt',
   'aria-checked',
+  'aria-selected',
+  'aria-controls',
+  'aria-owns',
   'aria-label',
   'aria-expanded',
   'href',
@@ -43,7 +47,18 @@ const CONTEXT_CONTROL_ATTRIBUTES = [
   'hidden',
   'inert',
 ];
+// Attributes whose meaning is presence, not value. HTML writes them empty
+// (`<input checked>`), so dropping empty values would silently delete the fact
+// they carry.
+//
+// `checked` and `selected` matter most and are the least obvious: buildDomTree
+// syncs them from the live DOM *property*, because clicking a checkbox updates
+// the property and never the attribute. Capturing that and then discarding it
+// here left an agent unable to see its own selection — it could tick a
+// "recurring" box and still read the form as unticked.
 const BOOLEAN_CONTEXT_ATTRIBUTES = new Set([
+  'checked',
+  'selected',
   'disabled',
   'readonly',
   'aria-disabled',
@@ -55,10 +70,17 @@ const OWNER_CONTEXT_TAG_NAMES = new Set(['section', 'fieldset', 'dialog', 'table
 const OWNER_CONTEXT_ROLES = new Set(['dialog', 'grid', 'listbox', 'table', 'section']);
 const OWNER_CONTEXT_TEXT_LENGTH = 80;
 
+export type DOMTextProjector = (value: string) => string;
+
+function projectDOMText(value: string, projector?: DOMTextProjector): string {
+  return projector ? projector(value) : value;
+}
+
 function formatNodeAttributes(
   node: DOMElementNode,
   includeAttributes: readonly string[],
-  text: string
+  text: string,
+  textProjector?: DOMTextProjector
 ): string | null {
   const attributesToInclude: Record<string, string> = {};
 
@@ -66,7 +88,10 @@ function formatNodeAttributes(
     if (!includeAttributes.includes(key)) {
       continue;
     }
-    const normalized = String(value).trim();
+    // Project raw attribute values before token-saving truncation. Protected
+    // values cannot be recovered by an exact-value projector once a prefix has
+    // already been serialized.
+    const normalized = projectDOMText(String(value), textProjector).trim();
     if (normalized !== '') {
       attributesToInclude[key] = normalized;
     } else if (BOOLEAN_CONTEXT_ATTRIBUTES.has(key)) {
@@ -138,7 +163,10 @@ function isPlannerVisibleControlContext(node: DOMElementNode): boolean {
   return disabled || readonly;
 }
 
-function ownerContextLineForNode(node: DOMElementNode): string | null {
+function ownerContextLineForNode(
+  node: DOMElementNode,
+  textProjector?: DOMTextProjector
+): string | null {
   if (!isVisibleOwnerContextContainer(node) || node.highlightIndex !== null) {
     return null;
   }
@@ -149,10 +177,14 @@ function ownerContextLineForNode(node: DOMElementNode): string | null {
 
   const tagName = (node.tagName ?? '').toLowerCase();
   const renderedTagName = node.tagName ?? 'element';
-  const role = node.attributes.role?.trim();
-  const ariaLabel = normalizeOwnerContextText(node.attributes['aria-label']);
-  const ariaLabelledBy = normalizeOwnerContextText(node.attributes['aria-labelledby']);
-  const headingText = directOwnerHeadingText(node);
+  const role = projectDOMText(node.attributes.role ?? '', textProjector).trim();
+  const ariaLabel = normalizeOwnerContextText(
+    projectDOMText(node.attributes['aria-label'] ?? '', textProjector)
+  );
+  const ariaLabelledBy = normalizeOwnerContextText(
+    projectDOMText(node.attributes['aria-labelledby'] ?? '', textProjector)
+  );
+  const headingText = directOwnerHeadingText(node, textProjector);
 
   if (!ariaLabel && !ariaLabelledBy && !headingText) {
     return null;
@@ -199,13 +231,20 @@ function hasActionableOrControlContextDescendant(node: DOMElementNode): boolean 
   return false;
 }
 
-function directOwnerHeadingText(node: DOMElementNode): string | null {
+function directOwnerHeadingText(
+  node: DOMElementNode,
+  textProjector?: DOMTextProjector
+): string | null {
   if ((node.tagName ?? '').toLowerCase() === 'fieldset') {
     const legend = node.children.find(
       (child): child is DOMElementNode =>
         child instanceof DOMElementNode && (child.tagName ?? '').toLowerCase() === 'legend' && child.isVisible,
     );
-    const legendText = legend ? normalizeOwnerContextText(legend.getAllTextTillNextClickableElement()) : null;
+    const legendText = legend
+      ? normalizeOwnerContextText(
+          projectDOMText(legend.getAllTextTillNextClickableElement(), textProjector)
+        )
+      : null;
     if (legendText) {
       return legendText;
     }
@@ -217,7 +256,11 @@ function directOwnerHeadingText(node: DOMElementNode): string | null {
     }
     return /^h[1-6]$/.test((child.tagName ?? '').toLowerCase());
   });
-  return heading ? normalizeOwnerContextText(heading.getAllTextTillNextClickableElement()) : null;
+  return heading
+    ? normalizeOwnerContextText(
+        projectDOMText(heading.getAllTextTillNextClickableElement(), textProjector)
+      )
+    : null;
 }
 
 function normalizeOwnerContextText(value: string | undefined): string | null {
@@ -293,6 +336,7 @@ export class DOMElementNode extends DOMBaseNode {
   isInViewport: boolean;
   shadowRoot: boolean;
   internalNodeId: string | null;
+  documentRef: string | null;
   highlightIndex: number | null;
   viewportCoordinates?: CoordinateSet;
   pageCoordinates?: CoordinateSet;
@@ -316,6 +360,7 @@ export class DOMElementNode extends DOMBaseNode {
     isInViewport?: boolean;
     shadowRoot?: boolean;
     internalNodeId?: string | null;
+    documentRef?: string | null;
     highlightIndex?: number | null;
     viewportCoordinates?: CoordinateSet;
     pageCoordinates?: CoordinateSet;
@@ -333,6 +378,7 @@ export class DOMElementNode extends DOMBaseNode {
     this.isInViewport = params.isInViewport ?? false;
     this.shadowRoot = params.shadowRoot ?? false;
     this.internalNodeId = params.internalNodeId ?? null;
+    this.documentRef = params.documentRef ?? null;
     this.highlightIndex = params.highlightIndex ?? null;
     this.viewportCoordinates = params.viewportCoordinates;
     this.pageCoordinates = params.pageCoordinates;
@@ -406,6 +452,13 @@ export class DOMElementNode extends DOMBaseNode {
         return;
       }
 
+      // `text` describes what is painted for the user. Accessible-only names
+      // remain available through aria-label/title and must not be mixed with a
+      // stale descendant that CSS has already hidden.
+      if (!node.isVisible) {
+        return;
+      }
+
       // Skip this branch if we hit a highlighted element (except for the current node)
       if (node instanceof DOMElementNode && node !== this && node.highlightIndex !== null) {
         return;
@@ -425,7 +478,8 @@ export class DOMElementNode extends DOMBaseNode {
   }
 
   clickableElementsToString(
-    includeAttributes: string[] | null = null
+    includeAttributes: string[] | null = null,
+    textProjector?: DOMTextProjector
   ): string {
     /**
      * Convert the processed DOM content to HTML.
@@ -445,8 +499,16 @@ export class DOMElementNode extends DOMBaseNode {
         if (node.highlightIndex !== null) {
           nextDepth += 1;
 
-          const text = node.getAllTextTillNextClickableElement();
-          const attributesHtmlStr = formatNodeAttributes(node, includeAttributes, text);
+          const text = projectDOMText(
+            node.getAllTextTillNextClickableElement(),
+            textProjector
+          );
+          const attributesHtmlStr = formatNodeAttributes(
+            node,
+            includeAttributes,
+            text,
+            textProjector
+          );
 
           // Build the line
           const highlightIndicator = node.isNew ? `*[${node.highlightIndex}]` : `[${node.highlightIndex}]`;
@@ -474,8 +536,16 @@ export class DOMElementNode extends DOMBaseNode {
           line += ' />'; // 1 token
           formattedText.push(line);
         } else if (isPlannerVisibleControlContext(node)) {
-          const text = node.getAllTextTillNextClickableElement();
-          const attributesHtmlStr = formatNodeAttributes(node, CONTEXT_CONTROL_ATTRIBUTES, text);
+          const text = projectDOMText(
+            node.getAllTextTillNextClickableElement(),
+            textProjector
+          );
+          const attributesHtmlStr = formatNodeAttributes(
+            node,
+            CONTEXT_CONTROL_ATTRIBUTES,
+            text,
+            textProjector
+          );
           let line = `${depthStr}<${node.tagName}`;
           if (attributesHtmlStr) {
             line += ` ${attributesHtmlStr}`;
@@ -493,7 +563,7 @@ export class DOMElementNode extends DOMBaseNode {
           formattedText.push(line);
           return;
         } else {
-          const ownerContextLine = ownerContextLineForNode(node);
+          const ownerContextLine = ownerContextLineForNode(node, textProjector);
           if (ownerContextLine) {
             formattedText.push(`${depthStr}${ownerContextLine}`);
             nextDepth += 1;
@@ -511,7 +581,9 @@ export class DOMElementNode extends DOMBaseNode {
         }
 
         if (node.parent && node.parent.isVisible && node.parent.isTopElement) {
-          formattedText.push(`${depthStr}${node.text}`);
+          formattedText.push(
+            `${depthStr}${projectDOMText(node.text, textProjector)}`
+          );
         }
       }
     };
@@ -736,6 +808,35 @@ export class DOMElementNode extends DOMBaseNode {
 export interface DOMState {
   elementTree: DOMElementNode;
   selectorMap: Map<number, DOMElementNode>;
+  formMutationFrames?: readonly FrameMutationState[];
+}
+
+export interface FrameMutationState {
+  readonly url: string;
+  readonly parentUrl?: string;
+  readonly mainFrame: boolean;
+  readonly checkpoint?: {
+    readonly documentRef: string;
+    readonly epoch: number;
+    readonly oldestRetainedEpoch: number;
+    readonly overflowed: boolean;
+  };
+  readonly summaries: readonly {
+    readonly epoch: number;
+    readonly kind:
+      | 'control_structure'
+      | 'owner_structure'
+      | 'identity_attribute'
+      | 'meaning_attribute'
+      | 'actionability_attribute'
+      | 'option_structure'
+      | 'contributing_label_text';
+    readonly affectedNodeIds: readonly string[];
+    readonly affectedOwnerNodeIds: readonly string[];
+    readonly attributeName?: string;
+  }[];
+  readonly coverageAvailable: boolean;
+  readonly missing: boolean;
 }
 
 export function domElementNodeToDict(elementTree: DOMBaseNode): unknown {

@@ -14,6 +14,11 @@ import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
 import { redactSensitiveText, type ExactValueRedactionProfiles } from '../redaction.js';
 import { buildBrowserPageSnapshot } from '../vendor/agent/prompts/browser-state-description.js';
 import { DEFAULT_AGENT_OPTIONS } from '../vendor/agent/types.js';
+import { randomUUID } from 'node:crypto';
+import {
+  createTargetObservationLease,
+  type TargetObservationLease,
+} from '../resolution/target-observation-lease.js';
 
 export interface ExecuteMagicBrowseObserveInput {
   readonly browser: Browser;
@@ -29,6 +34,7 @@ export interface ExecuteMagicBrowseObserveInput {
 export interface ExecuteMagicBrowseObserveResult {
   readonly result: MagicBrowseObserveResult;
   readonly activePageIdentity: MagicBrowseActivePageIdentity;
+  readonly observationLeases: readonly TargetObservationLease[];
 }
 
 export async function executeMagicBrowseObserve(
@@ -49,27 +55,67 @@ export async function executeMagicBrowseObserve(
   try {
     await ctx.getCurrentPage();
     const state = await ctx.getState(false);
+    const textProjector = input.redactionProfiles
+      ? (value: string) => redactPlannerViewForOutput(value, input.redactionProfiles)
+      : undefined;
     const rawPlannerView = buildBrowserPageSnapshot({
       state,
       includeAttributes: DEFAULT_AGENT_OPTIONS.includeAttributes,
+      ...(textProjector ? { textProjector } : {}),
     }).text;
-    const plannerView = redactPlannerViewForOutput(
-      rawPlannerView,
-      input.redactionProfiles
-    );
+    const plannerView = redactPlannerViewForOutput(rawPlannerView, input.redactionProfiles);
     const finalPage = await ctx.getCurrentPuppeteerPage();
     const activePageIdentity = await readPageIdentity(finalPage);
     const result: MagicBrowseObserveResult = input.includeOrchestration
       ? buildObservedResultWithOrchestration(plannerView, state, input.redactionProfiles)
       : { plannerView };
+    const observationLeases = buildPrivateObservationLeases(state);
 
     return {
       result,
       activePageIdentity,
+      observationLeases,
     };
   } finally {
     await ctx.cleanup();
   }
+}
+
+function buildPrivateObservationLeases(
+  state: BrowserStateTargetSource
+): readonly TargetObservationLease[] {
+  const observationRef = randomUUID();
+  const leases: TargetObservationLease[] = [];
+  const fillable = buildMemoryFieldTargetDescriptors(state);
+  for (const descriptor of fillable) {
+    const element = state.selectorMap.get(descriptor.selectorMapIndex);
+    if (!element) continue;
+    const actions =
+      descriptor.kind === 'select' ? (['select'] as const) : (['fill', 'type'] as const);
+    for (const action of actions) {
+      const lease = createTargetObservationLease({
+        state,
+        element,
+        descriptor,
+        action,
+        observationRef,
+      });
+      if (lease) leases.push(lease);
+    }
+  }
+  for (const descriptor of buildActionTargetDescriptors(state)) {
+    const element = state.selectorMap.get(descriptor.selectorMapIndex);
+    if (!element) continue;
+    const lease = createTargetObservationLease({
+      state,
+      element,
+      descriptor,
+      action: 'click',
+      observationRef,
+    });
+    if (lease) leases.push(lease);
+  }
+  return leases.slice(0, 1024);
 }
 
 function redactPlannerViewForOutput(

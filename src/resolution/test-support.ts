@@ -120,9 +120,7 @@ export function fakeCandidate(
   };
 }
 
-export function createFakeCandidateStore(
-  entries: readonly FakeCandidate[]
-): FakeCandidateStore {
+export function createFakeCandidateStore(entries: readonly FakeCandidate[]): FakeCandidateStore {
   const valuesByRef = new Map(entries.map((entry) => [entry.candidateRef, entry.value]));
   const readCalls: string[] = [];
 
@@ -138,9 +136,7 @@ export function createFakeCandidateStore(
   };
 }
 
-export function createFakePlannerModel(
-  decisions: readonly unknown[]
-): FakePlannerModel {
+export function createFakePlannerModel(decisions: readonly unknown[]): FakePlannerModel {
   const requests: FakePlannerRequest[] = [];
   let nextDecisionIndex = 0;
 

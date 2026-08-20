@@ -31,10 +31,13 @@ import type {
   MagicBrowseStatusResult,
   MagicBrowseTypeOptions,
   MagicBrowseHumanVerificationResolvedMarker,
-  MagicBrowseTrustedRuntimeEvidence,
 } from '../types.js';
 import { DEFAULT_GENERAL_SETTINGS } from '../adapter/storage-stubs.js';
-import { redactSensitiveValue } from '../redaction.js';
+import {
+  redactSensitiveText,
+  redactSensitiveValue,
+  type ExactValueRedactionProfiles,
+} from '../redaction.js';
 import {
   buildMagicBrowseDeterministicActionBlockedResult,
   executeMagicBrowseClickAction,
@@ -43,45 +46,63 @@ import {
   executeMagicBrowseSelectAction,
 } from '../resolution/deterministic-actions.js';
 import { submitFormTarget as executeSubmitFormTarget } from '../resolution/submit-target.js';
+import { targetDescriptorSignature } from '../resolution/target-observation-lease.js';
+import type { TargetObservationLease } from '../resolution/target-observation-lease.js';
 import { executeMagicBrowseAct } from '../runtime/execute-act.js';
 import {
   attachNativeBrowserDialogGuard,
   type NativeBrowserDialogGuard,
 } from '../runtime/native-dialogs.js';
 import { executeMagicBrowseObserve } from '../runtime/execute-observe.js';
+import {
+  DEFAULT_AGENTIC_ACT_TIMEOUT_MS,
+  DEFAULT_BROWSER_ACTION_TIMEOUT_MS,
+  BrowserActionDeadlineError,
+  disconnectBrowserOnce,
+  isBrowserActionDeadlineError,
+  normalizeBrowserActionTimeoutMs,
+  runWithBrowserActionDeadline,
+} from '../runtime/browser-action-deadline.js';
 import BrowserPage from '../vendor/browser/page.js';
+import { INITIAL_BROWSER_TAB_ID } from '../browser/browser-context.js';
 import {
   createFileAgentSessionStateStore,
   type AgentSessionStateStore,
 } from './agent-session-store.js';
-import {
-  buildCdpHttpEndpointUrl,
-  probeCdpEndpoint,
-  resolveAttachEndpoint,
-} from './attach-endpoint.js';
+import { probeCdpEndpoint, resolveAttachEndpoint } from './attach-endpoint.js';
 import {
   createDetachedChromeBrowserLauncher,
   normalizeProxySetting,
   type OwnedBrowserLauncher,
 } from './owned-browser-launcher.js';
-import {
-  readPageIdentity,
-  readPageTargetId,
-  resolveActivePage,
-  resolveActivePageForDiagnostics,
-} from './page-resolver.js';
+import { readPageIdentity, readPageTargetId, resolveActivePage } from './page-resolver.js';
 import {
   createFileMagicBrowseSessionStore,
   createPersistedMagicBrowseSession,
   type MagicBrowseSessionStore,
   type PersistedMagicBrowseSession,
+  persistedSessionRevision,
   touchPersistedMagicBrowseSession,
 } from './session-store.js';
 import {
   createFileMagicBrowseRunStore,
+  type MagicBrowseRunEventInput,
   type MagicBrowseRunRecorder,
   type MagicBrowseRunStore,
+  type MagicBrowseRunUpdateInput,
 } from './run-store.js';
+import {
+  buildAliveStatusResult,
+  DEFAULT_HUMAN_VERIFICATION_RESOLVED_TTL_SECONDS,
+  isBrowserbaseSession,
+  isMeaningfulHttpPageUrl,
+  normalizeMarkerTtlSeconds,
+  readConnectedStatusPageIdentityWithTimeout,
+  readPageIdentityFromCdpList,
+  resolveTrustedHumanVerificationEvidence,
+  statusSessionMetadata,
+  summarizeSession,
+} from './session-status.js';
 import {
   getDefaultMagicBrowseStealthPuppeteerClient,
   type MagicBrowsePuppeteerClient,
@@ -103,12 +124,13 @@ export interface MagicBrowseSessionManagerOptions {
   readonly createSessionId?: () => string;
   readonly createActId?: () => string;
   readonly createObserveId?: () => string;
+  /** Default aggregate deadline for act, observe, and deterministic actions. */
+  readonly browserActionTimeoutMs?: number;
 }
 
 const plainPuppeteer = puppeteer as unknown as MagicBrowsePuppeteerClient;
 const LOCAL_BROWSER_CONNECT_TIMEOUT_MS = 8_000;
 const DIAGNOSTIC_BROWSER_CONNECT_TIMEOUT_MS = 8_000;
-const DIAGNOSTIC_PAGE_RESOLUTION_TIMEOUT_MS = 8_000;
 const LOCAL_CDP_FALLBACK_PROTOCOL_TIMEOUT_MS = 3_000;
 const LOCAL_CDP_FALLBACK_PAGE_DISCOVERY_TIMEOUT_MS = 2_000;
 const LOCAL_CDP_FALLBACK_PAGE_DISCOVERY_POLL_MS = 50;
@@ -116,16 +138,20 @@ const LOCAL_CDP_FALLBACK_STRATEGY = 'without_initial_target_wait' as const;
 const LOCAL_CDP_FALLBACK_REASON = 'public_connect_timeout' as const;
 const OWNED_BROWSER_PUPPETEER_CLOSE_TIMEOUT_MS = 2_000;
 const OWNED_BROWSER_CLOSE_CONNECT_TIMEOUT_MS = 2_000;
-export const DEFAULT_HUMAN_VERIFICATION_RESOLVED_TTL_SECONDS = 300;
+const BROWSER_OPERATION_CLEANUP_TIMEOUT_MS = 2_000;
+export { DEFAULT_HUMAN_VERIFICATION_RESOLVED_TTL_SECONDS };
+
+class SessionAuthorityConflictError extends BrowserActionDeadlineError {
+  constructor(actionName: string) {
+    super('action_cancelled', actionName);
+    this.name = 'SessionAuthorityConflictError';
+  }
+}
 
 type BrowserConnectWithTimeoutResult =
   | { readonly status: 'connected'; readonly browser: Browser }
   | { readonly status: 'failed'; readonly error: unknown }
   | { readonly status: 'timed_out' };
-
-type StatusPageIdentityResolution =
-  | { readonly status: 'resolved'; readonly activePageIdentity: MagicBrowseActivePageIdentity }
-  | { readonly status: 'unresolved' | 'failed' | 'timed_out' };
 
 type MutablePersistedMagicBrowseSession = {
   -readonly [Key in keyof PersistedMagicBrowseSession]: PersistedMagicBrowseSession[Key];
@@ -152,6 +178,13 @@ export class MagicBrowseSessionManager {
   private readonly createSessionId: () => string;
   private readonly createActId: () => string;
   private readonly createObserveId: () => string;
+  private readonly browserActionTimeoutMs: number;
+  /**
+   * Kept separately from the resolved default so `act` can tell "the caller
+   * chose 60s" from "nobody chose anything". Only the latter gets the longer
+   * agentic budget; an explicit choice stays authoritative.
+   */
+  private readonly configuredBrowserActionTimeoutMs?: number;
 
   constructor(options: MagicBrowseSessionManagerOptions = {}) {
     this.store = options.store ?? createFileMagicBrowseSessionStore();
@@ -165,6 +198,13 @@ export class MagicBrowseSessionManager {
     this.createSessionId = options.createSessionId ?? createDefaultSessionId;
     this.createActId = options.createActId ?? createDefaultActId;
     this.createObserveId = options.createObserveId ?? createDefaultObserveId;
+    this.browserActionTimeoutMs = normalizeBrowserActionTimeoutMs(
+      options.browserActionTimeoutMs ?? DEFAULT_BROWSER_ACTION_TIMEOUT_MS
+    );
+    this.configuredBrowserActionTimeoutMs =
+      options.browserActionTimeoutMs === undefined
+        ? undefined
+        : normalizeBrowserActionTimeoutMs(options.browserActionTimeoutMs);
   }
 
   async launch(options: MagicBrowseLaunchOptions = {}): Promise<MagicBrowseManagedSession> {
@@ -275,7 +315,9 @@ export class MagicBrowseSessionManager {
       });
       await runRecorder.update({ status: 'failed' });
       if (launched) {
-        await this.launcher.close({ cdpUrl: launched.cdpUrl, pid: launched.pid }).catch(() => undefined);
+        await this.launcher
+          .close({ cdpUrl: launched.cdpUrl, pid: launched.pid })
+          .catch(() => undefined);
       }
       throw error;
     } finally {
@@ -453,7 +495,10 @@ export class MagicBrowseSessionManager {
         },
       });
       if (current) {
-        await this.closeCurrentSession({ sessionId: current.id, ignoreMissing: true });
+        await this.closeCurrentSession({
+          sessionId: current.id,
+          ignoreMissing: true,
+        });
       }
       await this.store.saveCurrentSession(session);
       await runRecorder.update({
@@ -492,7 +537,10 @@ export class MagicBrowseSessionManager {
     const connectUrl = requireBrowserbaseConnectUrl(browserbaseSession, cloudSessionId);
 
     const current = await this.store.loadCurrentSession();
-    if (current?.cloudProvider?.name === 'browserbase' && current.cloudProvider.sessionId === browserbaseSession.id) {
+    if (
+      current?.cloudProvider?.name === 'browserbase' &&
+      current.cloudProvider.sessionId === browserbaseSession.id
+    ) {
       const runRecorder = await this.ensureSessionRun(current);
       await runRecorder.append({
         type: 'session.attach.reused',
@@ -591,227 +639,435 @@ export class MagicBrowseSessionManager {
     let browser: Browser | undefined;
     let markerClearReason: 'consumed' | 'expired' | 'page_mismatch' | undefined;
     let latestResolvedPageIdentity = session.activePageIdentity;
+    const disconnectCurrentBrowser = createDisconnectCurrentBrowser(() => browser);
+    // An act is many steps, each with a model round trip, so it gets the
+    // agentic budget rather than the single-action one. An explicit choice —
+    // per call, or on the manager — still wins.
+    const actionTimeoutMs = normalizeBrowserActionTimeoutMs(
+      options.timeoutMs ?? this.configuredBrowserActionTimeoutMs ?? DEFAULT_AGENTIC_ACT_TIMEOUT_MS
+    );
+    let bufferedRunRecorder: BufferedRunRecorder | undefined;
 
     try {
-      browser = await this.connect(session, { runRecorder, actId }).catch((error: unknown) => {
-        throw createDeadSessionError(error);
-      });
-      const page = await resolveActivePage({
-        browser,
-        activePageIdentity: session.activePageIdentity,
-      });
-      await authenticateProxyIfNeeded(page, session.proxy);
-      latestResolvedPageIdentity = await readPageIdentity(page);
-      await runRecorder.append({
-        type: 'act.page_resolved',
-        actId,
-        data: {
-          before: session.activePageIdentity,
-          resolved: latestResolvedPageIdentity,
-        },
-      });
-      const markerResolution = resolveTrustedHumanVerificationEvidence({
-        marker: session.humanVerificationResolved,
-        currentPageIdentity: latestResolvedPageIdentity,
-        now: new Date(),
-      });
-      markerClearReason = markerResolution.clearReason;
-      if (markerResolution.clearReason) {
-        await runRecorder.append({
-          type: 'human_verification.marker.resolved',
-          level: markerResolution.evidence ? 'info' : 'debug',
-          actId,
-          data: {
-            verificationKind: 'captcha',
-            clearReason: markerResolution.clearReason,
-            markerPageIdentity: session.humanVerificationResolved?.pageIdentity,
-            currentPageIdentity: latestResolvedPageIdentity,
-            expiresAt: session.humanVerificationResolved?.expiresAt,
-          },
-        });
-      }
-      const loadedAgentState = await this.agentStateStore.loadAgentState(session.id);
-      if (loadedAgentState.warning) {
-        await runRecorder.append({
-          type: 'agent.state.load.warning',
-          level: 'warn',
-          actId,
-          message: loadedAgentState.warning,
-        });
-      } else if (loadedAgentState.state) {
-        await runRecorder.append({
-          type: 'agent.state.loaded',
-          level: 'debug',
-          actId,
-          data: {
-            taskCount: loadedAgentState.state.tasks.length,
-            messageCount: loadedAgentState.state.messageManager.messages.length,
-          },
-        });
-      }
-      const executed = await executeMagicBrowseAct({
-        browser,
-        page,
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        options,
-        runRecorder,
-        actId,
-        initialAgentState: loadedAgentState.state,
-        redactionProfiles: session.redactionProfiles,
-        trustedRuntimeEvidence: markerResolution.evidence
-          ? [markerResolution.evidence]
-          : undefined,
-      });
-      await this.agentStateStore.saveAgentState(session.id, executed.agentState);
-      const updatedSession = touchPersistedMagicBrowseSession(session, {
-        runId: runRecorder.runId,
-        activePageIdentity: executed.activePageIdentity,
-        humanVerificationResolved: markerClearReason ? null : undefined,
-      });
-      await this.store.saveCurrentSession(updatedSession);
-      await runRecorder.update({
+      const prepared = await runWithBrowserActionDeadline(
+        async (signal) =>
+          withAbortedBrowserDisconnect(signal, disconnectCurrentBrowser, async () => {
+            bufferedRunRecorder = createBufferedRunRecorder(runRecorder, signal);
+            const operationRunRecorder = bufferedRunRecorder.recorder;
+            browser = await this.connect(session, {
+              runRecorder: operationRunRecorder,
+              actId,
+            }).catch((error: unknown) => {
+              throw createDeadSessionError(error);
+            });
+            throwIfBrowserActionAborted(signal);
+            const page = await resolveActivePage({
+              browser,
+              activePageIdentity: session.activePageIdentity,
+            });
+            throwIfBrowserActionAborted(signal);
+            await authenticateProxyIfNeeded(page, session.proxy);
+            throwIfBrowserActionAborted(signal);
+            latestResolvedPageIdentity = await readPageIdentity(page);
+            throwIfBrowserActionAborted(signal);
+            const safeResolvedPageIdentity = safePageIdentityForPersistence(
+              latestResolvedPageIdentity,
+              session.redactionProfiles
+            );
+            await operationRunRecorder.append({
+              type: 'act.page_resolved',
+              actId,
+              data: {
+                before: session.activePageIdentity,
+                resolved: safeResolvedPageIdentity,
+              },
+            });
+            const markerResolution = resolveTrustedHumanVerificationEvidence({
+              marker: session.humanVerificationResolved,
+              currentPageIdentity: latestResolvedPageIdentity,
+              now: new Date(),
+            });
+            markerClearReason = markerResolution.clearReason;
+            if (markerResolution.clearReason) {
+              await operationRunRecorder.append({
+                type: 'human_verification.marker.resolved',
+                level: markerResolution.evidence ? 'info' : 'debug',
+                actId,
+                data: {
+                  verificationKind: 'captcha',
+                  clearReason: markerResolution.clearReason,
+                  markerPageIdentity: session.humanVerificationResolved?.pageIdentity,
+                  currentPageIdentity: safeResolvedPageIdentity,
+                  expiresAt: session.humanVerificationResolved?.expiresAt,
+                },
+              });
+            }
+            const loadedAgentState = await this.agentStateStore.loadAgentState(session.id);
+            throwIfBrowserActionAborted(signal);
+            if (loadedAgentState.warning) {
+              await operationRunRecorder.append({
+                type: 'agent.state.load.warning',
+                level: 'warn',
+                actId,
+                message: loadedAgentState.warning,
+              });
+            } else if (loadedAgentState.state) {
+              await operationRunRecorder.append({
+                type: 'agent.state.loaded',
+                level: 'debug',
+                actId,
+                data: {
+                  taskCount: loadedAgentState.state.tasks.length,
+                  messageCount: loadedAgentState.state.messageManager.messages.length,
+                },
+              });
+            }
+            throwIfBrowserActionAborted(signal);
+            const executed = await executeMagicBrowseAct({
+              browser,
+              page,
+              displayHighlights: session.ownership === 'attached' || session.headless === false,
+              options: { ...options, timeoutMs: actionTimeoutMs, signal },
+              browserActionTimeoutMs: actionTimeoutMs,
+              runRecorder: operationRunRecorder,
+              actId,
+              initialAgentState: loadedAgentState.state,
+              redactionProfiles: session.redactionProfiles,
+              trustedRuntimeEvidence: markerResolution.evidence
+                ? [markerResolution.evidence]
+                : undefined,
+            });
+            throwIfBrowserActionAborted(signal);
+            const result = safeActResult(executed.result, session.redactionProfiles);
+            if (
+              (result.status === 'timed_out' || result.status === 'cancelled') &&
+              result.mutationState === 'unknown'
+            ) {
+              throw new BrowserActionDeadlineError(
+                result.status === 'timed_out' ? 'action_timeout' : 'action_cancelled',
+                'act',
+                result.status === 'timed_out' ? actionTimeoutMs : undefined
+              );
+            }
+            const activePageIdentity = safePageIdentityForPersistence(
+              executed.activePageIdentity,
+              session.redactionProfiles
+            );
+            const updatedSession = touchPersistedMagicBrowseSession(session, {
+              runId: runRecorder.runId,
+              activePageIdentity,
+              humanVerificationResolved: markerClearReason ? null : undefined,
+            });
+            await this.saveSessionIfCurrent(session, updatedSession);
+            throwIfBrowserActionAborted(signal);
+            const agentStateSaved = await this.agentStateStore.saveAgentStateIfNewer(
+              session.id,
+              executed.agentState,
+              persistedSessionRevision(updatedSession)
+            );
+            if (!agentStateSaved) {
+              throw new SessionAuthorityConflictError('agent_state_commit');
+            }
+            throwIfBrowserActionAborted(signal);
+            return {
+              result,
+              activePageIdentity,
+            };
+          }),
+        {
+          actionName: 'act',
+          timeoutMs: actionTimeoutMs,
+          signal: options.signal,
+          cancel: disconnectCurrentBrowser,
+        }
+      );
+
+      await bufferedRunRecorder?.recorder.update({
         instruction: options.goal,
-        activePageIdentity: executed.activePageIdentity,
-        lastActStatus: executed.result.status,
-        lastFinalUrl: executed.result.finalUrl,
+        activePageIdentity: prepared.activePageIdentity,
+        lastActStatus: prepared.result.status,
+        lastFinalUrl: prepared.result.finalUrl,
       });
-      await runRecorder.append({
+      await bufferedRunRecorder?.recorder.append({
         type: 'act.complete',
         actId,
         data: {
-          status: executed.result.status,
-          finalUrl: executed.result.finalUrl,
-          finalMessage: executed.result.finalMessage,
-          handoff: executed.result.handoff,
-          blockedReason: executed.result.blockedReason,
-          dialog: executed.result.dialog,
-          stepCount: executed.result.steps.length,
-          activePageIdentity: executed.activePageIdentity,
+          status: prepared.result.status,
+          finalUrl: prepared.result.finalUrl,
+          finalMessage: prepared.result.finalMessage,
+          handoff: prepared.result.handoff,
+          blockedReason: prepared.result.blockedReason,
+          dialog: prepared.result.dialog,
+          stepCount: prepared.result.steps.length,
+          activePageIdentity: prepared.activePageIdentity,
         },
       });
-      return executed.result;
+      if (bufferedRunRecorder) {
+        await settleCleanup(bufferedRunRecorder.commit());
+      }
+      return prepared.result;
     } catch (error) {
+      bufferedRunRecorder?.discard();
+      if (isBrowserActionDeadlineError(error)) {
+        if (!(error instanceof SessionAuthorityConflictError)) {
+          await this.fenceTimedOutOperation(session, runRecorder.runId);
+        }
+        const result = deadlineActResult(error);
+        await settleCleanup(
+          runRecorder.append({
+            type: 'act.timeout',
+            level: 'warn',
+            actId,
+            data: {
+              status: result.status,
+              retryable: result.retryable,
+              mutationState: result.mutationState,
+              recovery: result.recovery,
+            },
+          })
+        );
+        await settleCleanup(runRecorder.update({ lastActStatus: result.status }));
+        return result;
+      }
       if (markerClearReason) {
-        await this.store.saveCurrentSession(
+        await this.store.saveCurrentSessionIfRevision(
           touchPersistedMagicBrowseSession(session, {
             runId: runRecorder.runId,
-            activePageIdentity: latestResolvedPageIdentity,
+            activePageIdentity: safePageIdentityForPersistence(
+              latestResolvedPageIdentity ?? {},
+              session.redactionProfiles
+            ),
             humanVerificationResolved: null,
-          })
+          }),
+          persistedSessionRevision(session)
         );
       }
       await runRecorder.append({
         type: 'act.error',
         level: 'error',
         actId,
-        message: errorToMessage(error),
+        message: redactSensitiveText(errorToMessage(error), {
+          redactionProfiles: session.redactionProfiles,
+        }),
       });
       await runRecorder.update({ lastActStatus: 'error' });
-      throw error;
+      throw safeOperationError(error, session.redactionProfiles);
     } finally {
       if (browser) {
-        await disconnectBrowser(browser);
-        await runRecorder.append({
-          type: 'act.browser_disconnected',
-          actId,
-        });
+        await disconnectCurrentBrowser();
+        await settleCleanup(
+          runRecorder.append({
+            type: 'act.browser_disconnected',
+            actId,
+          })
+        );
       } else {
-        await runRecorder.append({
-          type: 'act.browser_not_connected',
-          level: 'warn',
-          actId,
-        });
+        await settleCleanup(
+          runRecorder.append({
+            type: 'act.browser_not_connected',
+            level: 'warn',
+            actId,
+          })
+        );
       }
-      await runRecorder.flush();
+      await settleCleanup(runRecorder.flush());
     }
   }
 
   async observe(options: MagicBrowseObserveOptions = {}): Promise<MagicBrowseObserveResult> {
-    const session = await this.requireCurrentSession('observe', options.sessionId);
-    const runRecorder = await this.ensureSessionRun(session);
+    const loadedSession = await this.requireCurrentSession('observe', options.sessionId);
+    let session = loadedSession;
+    let runRecorder: MagicBrowseRunRecorder | undefined;
     const observeId = this.createObserveId();
-    await runRecorder.append({
-      type: 'observe.start',
-      actId: observeId,
-      data: {
-        sessionId: session.id,
-        runId: runRecorder.runId,
-        activePageIdentity: session.activePageIdentity,
-      },
-    });
     let browser: Browser | undefined;
+    const disconnectCurrentBrowser = createDisconnectCurrentBrowser(() => browser);
+    const timeoutMs = normalizeBrowserActionTimeoutMs(
+      options.timeoutMs ?? this.browserActionTimeoutMs
+    );
+    let bufferedRunRecorder: BufferedRunRecorder | undefined;
 
     try {
-      browser = await this.connect(session, { runRecorder, actId: observeId }).catch(
-        (error: unknown) => {
-          throw createDeadSessionError(error);
+      const prepared = await runWithBrowserActionDeadline(
+        async (signal) =>
+          withAbortedBrowserDisconnect(signal, disconnectCurrentBrowser, async () => {
+            session = await this.persistOperationRedactionProfiles(
+              loadedSession,
+              options.redactionProfiles
+            );
+            throwIfBrowserActionAborted(signal);
+            const operationBaseRunRecorder = await this.ensureSessionRun(session);
+            runRecorder = operationBaseRunRecorder;
+            throwIfBrowserActionAborted(signal);
+            if (options.redactionProfiles) {
+              await operationBaseRunRecorder.update({
+                redactionProfiles: options.redactionProfiles,
+              });
+              throwIfBrowserActionAborted(signal);
+            }
+            await operationBaseRunRecorder.append({
+              type: 'observe.start',
+              actId: observeId,
+              data: {
+                sessionId: session.id,
+                runId: operationBaseRunRecorder.runId,
+                activePageIdentity: session.activePageIdentity,
+              },
+            });
+            throwIfBrowserActionAborted(signal);
+            bufferedRunRecorder = createBufferedRunRecorder(operationBaseRunRecorder, signal);
+            const operationRunRecorder = bufferedRunRecorder.recorder;
+            browser = await this.connect(session, {
+              runRecorder: operationRunRecorder,
+              actId: observeId,
+            }).catch((error: unknown) => {
+              throw createDeadSessionError(error);
+            });
+            throwIfBrowserActionAborted(signal);
+            const page = await resolveActivePage({
+              browser,
+              activePageIdentity: session.activePageIdentity,
+            });
+            throwIfBrowserActionAborted(signal);
+            await authenticateProxyIfNeeded(page, session.proxy);
+            throwIfBrowserActionAborted(signal);
+            const currentPageIdentity = await readPageIdentity(page);
+            const resolvedPageIdentity = safePageIdentityForPersistence(
+              currentPageIdentity,
+              session.redactionProfiles
+            );
+            const markerResolution = resolveTrustedHumanVerificationEvidence({
+              marker: session.humanVerificationResolved,
+              currentPageIdentity,
+              now: new Date(),
+            });
+            throwIfBrowserActionAborted(signal);
+            await operationRunRecorder.append({
+              type: 'observe.page_resolved',
+              actId: observeId,
+              data: {
+                before: session.activePageIdentity,
+                resolved: resolvedPageIdentity,
+              },
+            });
+            throwIfBrowserActionAborted(signal);
+            const observed = await executeMagicBrowseObserve({
+              browser,
+              page,
+              displayHighlights: session.ownership === 'attached' || session.headless === false,
+              includeOrchestration: options.includeOrchestration,
+              ...(typeof options.viewportExpansion === 'number'
+                ? { viewportExpansion: options.viewportExpansion }
+                : {}),
+              runRecorder: operationRunRecorder,
+              observeId,
+              redactionProfiles: session.redactionProfiles,
+            });
+            throwIfBrowserActionAborted(signal);
+            const activePageIdentity = safePageIdentityForPersistence(
+              observed.activePageIdentity,
+              session.redactionProfiles
+            );
+            const updatedSession = touchPersistedMagicBrowseSession(session, {
+              runId: operationBaseRunRecorder.runId,
+              activePageIdentity,
+              observationLeases: mergeObservationLeases(
+                session.observationLeases,
+                observed.observationLeases
+              ),
+              humanVerificationResolved: markerResolution.clearReason ? null : undefined,
+            });
+            await this.saveSessionIfCurrent(session, updatedSession);
+            throwIfBrowserActionAborted(signal);
+            return {
+              result: markerResolution.evidence
+                ? {
+                    ...observed.result,
+                    trustedRuntimeEvidence: [markerResolution.evidence],
+                  }
+                : observed.result,
+              activePageIdentity,
+            };
+          }),
+        {
+          actionName: 'observe',
+          timeoutMs,
+          signal: options.signal,
+          cancel: disconnectCurrentBrowser,
         }
       );
-      const page = await resolveActivePage({
-        browser,
-        activePageIdentity: session.activePageIdentity,
+
+      await bufferedRunRecorder?.recorder.update({
+        activePageIdentity: prepared.activePageIdentity,
       });
-      await authenticateProxyIfNeeded(page, session.proxy);
-      await runRecorder.append({
-        type: 'observe.page_resolved',
-        actId: observeId,
-        data: {
-          before: session.activePageIdentity,
-          resolved: await readPageIdentity(page),
-        },
-      });
-      const observed = await executeMagicBrowseObserve({
-        browser,
-        page,
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        includeOrchestration: options.includeOrchestration,
-        ...(typeof options.viewportExpansion === 'number'
-          ? { viewportExpansion: options.viewportExpansion }
-          : {}),
-        runRecorder,
-        observeId,
-        redactionProfiles: session.redactionProfiles,
-      });
-      const updatedSession = touchPersistedMagicBrowseSession(session, {
-        runId: runRecorder.runId,
-        activePageIdentity: observed.activePageIdentity,
-      });
-      await this.store.saveCurrentSession(updatedSession);
-      await runRecorder.update({
-        activePageIdentity: observed.activePageIdentity,
-      });
-      await runRecorder.append({
+      await bufferedRunRecorder?.recorder.append({
         type: 'observe.complete',
         actId: observeId,
         data: {
-          plannerViewLength: observed.result.plannerView.length,
-          activePageIdentity: observed.activePageIdentity,
+          plannerViewLength: prepared.result.plannerView.length,
+          activePageIdentity: prepared.activePageIdentity,
         },
       });
-      return observed.result;
-    } catch (error) {
-      await runRecorder.append({
-        type: 'observe.error',
-        level: 'error',
-        actId: observeId,
-        message: errorToMessage(error),
-      });
-      throw error;
-    } finally {
-      if (browser) {
-        await disconnectBrowser(browser);
-        await runRecorder.append({
-          type: 'observe.browser_disconnected',
-          actId: observeId,
-        });
-      } else {
-        await runRecorder.append({
-          type: 'observe.browser_not_connected',
-          level: 'warn',
-          actId: observeId,
-        });
+      if (bufferedRunRecorder) {
+        await settleCleanup(bufferedRunRecorder.commit());
       }
-      await runRecorder.flush();
+      return prepared.result;
+    } catch (error) {
+      bufferedRunRecorder?.discard();
+      if (isBrowserActionDeadlineError(error)) {
+        if (!(error instanceof SessionAuthorityConflictError)) {
+          await this.fenceTimedOutOperation(session, runRecorder?.runId ?? session.runId);
+        }
+        if (runRecorder) {
+          await settleCleanup(
+            runRecorder.append({
+              type: 'observe.timeout',
+              level: 'warn',
+              actId: observeId,
+              data: {
+                code: error.code,
+                retryable: true,
+                mutationState: error.mutationState,
+                recovery: error.recovery,
+              },
+            })
+          );
+        }
+        throw error;
+      }
+      if (runRecorder) {
+        await settleCleanup(
+          runRecorder.append({
+            type: 'observe.error',
+            level: 'error',
+            actId: observeId,
+            message: redactSensitiveText(errorToMessage(error), {
+              redactionProfiles: session.redactionProfiles,
+            }),
+          })
+        );
+      }
+      throw safeOperationError(error, session.redactionProfiles);
+    } finally {
+      await disconnectCurrentBrowser();
+      if (runRecorder) {
+        if (browser) {
+          await settleCleanup(
+            runRecorder.append({
+              type: 'observe.browser_disconnected',
+              actId: observeId,
+            })
+          );
+        } else {
+          await settleCleanup(
+            runRecorder.append({
+              type: 'observe.browser_not_connected',
+              level: 'warn',
+              actId: observeId,
+            })
+          );
+        }
+        await settleCleanup(runRecorder.flush());
+      }
     }
   }
 
@@ -819,16 +1075,23 @@ export class MagicBrowseSessionManager {
     return this.executeDeterministicCurrentSession({
       action: 'click',
       sessionId: options.sessionId,
+      viewportExpansion: options.viewportExpansion,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
       targetRef: options.target.ref,
+      descriptorSignature: targetDescriptorSignature(options.target, 'click'),
       failureReason: 'click_failed',
-      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session, observationLease }) =>
         executeMagicBrowseClickAction({
           sessionId: session.id,
           target: options.target,
           page: browserPage,
           runRecorder,
+          redactionProfiles: session.redactionProfiles,
           readPageIdentity: async () => readPageIdentity(page),
           nativeDialog,
+          observationLease,
+          ...(options.progressEvidence ? { progressEvidence: true } : {}),
         }),
     });
   }
@@ -837,9 +1100,14 @@ export class MagicBrowseSessionManager {
     return this.executeDeterministicCurrentSession({
       action: 'type',
       sessionId: options.sessionId,
+      viewportExpansion: options.viewportExpansion,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      redactionProfiles: options.redactionProfiles,
       targetRef: options.target.ref,
+      descriptorSignature: targetDescriptorSignature(options.target, 'type'),
       failureReason: 'input_failed',
-      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session, observationLease }) =>
         executeMagicBrowseInputAction({
           action: 'type',
           sessionId: session.id,
@@ -847,8 +1115,10 @@ export class MagicBrowseSessionManager {
           text: options.text,
           page: browserPage,
           runRecorder,
+          redactionProfiles: session.redactionProfiles,
           readPageIdentity: async () => readPageIdentity(page),
           nativeDialog,
+          observationLease,
         }),
     });
   }
@@ -857,9 +1127,14 @@ export class MagicBrowseSessionManager {
     return this.executeDeterministicCurrentSession({
       action: 'fill',
       sessionId: options.sessionId,
+      viewportExpansion: options.viewportExpansion,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      redactionProfiles: options.redactionProfiles,
       targetRef: options.target.ref,
+      descriptorSignature: targetDescriptorSignature(options.target, 'fill'),
       failureReason: 'input_failed',
-      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session, observationLease }) =>
         executeMagicBrowseInputAction({
           action: 'fill',
           sessionId: session.id,
@@ -867,8 +1142,10 @@ export class MagicBrowseSessionManager {
           text: options.value,
           page: browserPage,
           runRecorder,
+          redactionProfiles: session.redactionProfiles,
           readPageIdentity: async () => readPageIdentity(page),
           nativeDialog,
+          observationLease,
         }),
     });
   }
@@ -877,17 +1154,24 @@ export class MagicBrowseSessionManager {
     return this.executeDeterministicCurrentSession({
       action: 'select',
       sessionId: options.sessionId,
+      viewportExpansion: options.viewportExpansion,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      redactionProfiles: options.redactionProfiles,
       targetRef: options.target.ref,
+      descriptorSignature: targetDescriptorSignature(options.target, 'select'),
       failureReason: 'select_failed',
-      run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
+      run: ({ browserPage, nativeDialog, page, runRecorder, session, observationLease }) =>
         executeMagicBrowseSelectAction({
           sessionId: session.id,
           target: options.target,
           optionText: options.optionText,
           page: browserPage,
           runRecorder,
+          redactionProfiles: session.redactionProfiles,
           readPageIdentity: async () => readPageIdentity(page),
           nativeDialog,
+          observationLease,
         }),
     });
   }
@@ -896,6 +1180,8 @@ export class MagicBrowseSessionManager {
     return this.executeDeterministicCurrentSession({
       action: 'press',
       sessionId: options.sessionId,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal,
       failureReason: 'press_failed',
       run: ({ browserPage, nativeDialog, page, runRecorder, session }) =>
         executeMagicBrowsePressAction({
@@ -903,13 +1189,16 @@ export class MagicBrowseSessionManager {
           keys: options.keys,
           page: browserPage,
           runRecorder,
+          redactionProfiles: session.redactionProfiles,
           readPageIdentity: async () => readPageIdentity(page),
           nativeDialog,
         }),
     });
   }
 
-  async screenshot(options: MagicBrowseScreenshotOptions = {}): Promise<MagicBrowseScreenshotResult> {
+  async screenshot(
+    options: MagicBrowseScreenshotOptions = {}
+  ): Promise<MagicBrowseScreenshotResult> {
     const session = await this.requireCurrentSession('screenshot', options.sessionId);
     const runRecorder = await this.ensureSessionRun(session);
     const outputPath = options.path ?? `/tmp/magicbrowse-screenshot-${Date.now()}.png`;
@@ -925,7 +1214,10 @@ export class MagicBrowseSessionManager {
       });
       await authenticateProxyIfNeeded(page, session.proxy);
       await page.screenshot({ path: outputPath });
-      const activePageIdentity = await readPageIdentity(page);
+      const activePageIdentity = safePageIdentityForPersistence(
+        await readPageIdentity(page),
+        session.redactionProfiles
+      );
       const updatedSession = touchPersistedMagicBrowseSession(session, {
         runId: runRecorder.runId,
         activePageIdentity,
@@ -962,7 +1254,9 @@ export class MagicBrowseSessionManager {
       return {
         status: 'blocked',
         reason: 'screenshot_failed',
-        summary: error instanceof Error ? error.message : String(error),
+        summary: redactSensitiveText(error instanceof Error ? error.message : String(error), {
+          redactionProfiles: session.redactionProfiles,
+        }),
       };
     } finally {
       if (browser) {
@@ -989,10 +1283,14 @@ export class MagicBrowseSessionManager {
         activePageIdentity: session.activePageIdentity,
       });
       await authenticateProxyIfNeeded(page, session.proxy);
-      const browserPage = new BrowserPage(page, {
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
-      });
+      const browserPage = new BrowserPage(
+        page,
+        {
+          displayHighlights: session.ownership === 'attached' || session.headless === false,
+          minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
+        },
+        INITIAL_BROWSER_TAB_ID
+      );
       nativeDialog = attachNativeBrowserDialogGuard(page, {
         runRecorder,
         redactionProfiles: session.redactionProfiles,
@@ -1006,15 +1304,19 @@ export class MagicBrowseSessionManager {
         readPageIdentity: async () => readPageIdentity(page),
         nativeDialog,
       });
+      const activePageIdentity = safePageIdentityForPersistence(
+        await readPageIdentity(page),
+        session.redactionProfiles
+      );
       const updatedSession = touchPersistedMagicBrowseSession(session, {
         runId: runRecorder.runId,
-        activePageIdentity: await readPageIdentity(page),
+        activePageIdentity,
       });
       await this.store.saveCurrentSession(updatedSession);
       await runRecorder.update({
         activePageIdentity: updatedSession.activePageIdentity,
       });
-      return result;
+      return safePageMetadataResult(result, session.redactionProfiles);
     } catch (error) {
       await runRecorder.append({
         type: 'submit_target.error',
@@ -1028,7 +1330,7 @@ export class MagicBrowseSessionManager {
           reason: 'submit_failed',
         },
       });
-      throw error;
+      throw safeOperationError(error, session.redactionProfiles);
     } finally {
       nativeDialog?.detach();
       if (browser) {
@@ -1064,7 +1366,10 @@ export class MagicBrowseSessionManager {
         activePageIdentity: session.activePageIdentity,
       });
       await authenticateProxyIfNeeded(page, session.proxy);
-      const pageIdentity = await readPageIdentity(page);
+      const pageIdentity = safePageIdentityForPersistence(
+        await readPageIdentity(page),
+        session.redactionProfiles
+      );
       const resolvedAt = new Date();
       const marker: MagicBrowseHumanVerificationResolvedMarker = {
         kind: 'humanVerificationResolved',
@@ -1101,9 +1406,11 @@ export class MagicBrowseSessionManager {
       await runRecorder.append({
         type: 'human_verification.mark.error',
         level: 'error',
-        message: errorToMessage(error),
+        message: redactSensitiveText(errorToMessage(error), {
+          redactionProfiles: session.redactionProfiles,
+        }),
       });
-      throw error;
+      throw safeOperationError(error, session.redactionProfiles);
     } finally {
       if (browser) {
         await disconnectBrowser(browser);
@@ -1116,7 +1423,10 @@ export class MagicBrowseSessionManager {
   }
 
   async close(options: MagicBrowseCloseOptions = {}): Promise<void> {
-    await this.closeCurrentSession({ sessionId: options.sessionId, ignoreMissing: false });
+    await this.closeCurrentSession({
+      sessionId: options.sessionId,
+      ignoreMissing: false,
+    });
   }
 
   async currentSession(): Promise<MagicBrowseManagedSession | undefined> {
@@ -1262,11 +1572,101 @@ export class MagicBrowseSessionManager {
     });
   }
 
+  /**
+   * Navigate the current session's active page to a URL without any LLM
+   * involvement (same primitive execute-act uses for its entry URL). Lets
+   * orchestration layers (replay) reuse a live browser across flows instead
+   * of paying a fresh launch per flow. Throws when no session exists.
+   */
+  async navigateCurrentSession(url: string, sessionId?: string): Promise<void> {
+    const session = await this.loadCurrentSessionForDeterministicAction(sessionId);
+    if (!session) {
+      throw new Error('navigateCurrentSession requires an existing session');
+    }
+    const runRecorder = await this.ensureSessionRun(session);
+    let browser: Browser | undefined;
+    try {
+      browser = await this.connect(session, { runRecorder });
+      const page = await resolveActivePage({
+        browser,
+        activePageIdentity: session.activePageIdentity,
+      });
+      await authenticateProxyIfNeeded(page, session.proxy);
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      const activePageIdentity = safePageIdentityForPersistence(
+        await readPageIdentity(page),
+        session.redactionProfiles
+      );
+      await this.store.saveCurrentSession(
+        touchPersistedMagicBrowseSession(session, {
+          runId: runRecorder.runId,
+          activePageIdentity,
+        })
+      );
+      await runRecorder.update({ activePageIdentity });
+      await runRecorder.append({
+        type: 'session.navigate',
+        level: 'info',
+        message: redactSensitiveText(url, {
+          redactionProfiles: session.redactionProfiles,
+        }),
+      });
+    } catch (error) {
+      throw safeOperationError(error, session.redactionProfiles);
+    } finally {
+      if (browser) {
+        await disconnectBrowser(browser);
+      }
+      await runRecorder.flush();
+    }
+  }
+
+  /**
+   * Append a custom event to the current session's run record. Used by
+   * orchestration layers (replay) to leave telemetry markers alongside the
+   * events the runtime already records; a no-op when no session exists.
+   */
+  async recordSessionRunEvent(event: {
+    readonly type: string;
+    readonly message?: string;
+    readonly data?: unknown;
+  }): Promise<void> {
+    const session = await this.loadCurrentSessionForDeterministicAction(undefined);
+    if (!session) {
+      return;
+    }
+    const runRecorder = await this.ensureSessionRun(session);
+    await runRecorder.append({
+      type: event.type,
+      level: 'info',
+      ...(event.message
+        ? {
+            message: redactSensitiveText(event.message, {
+              redactionProfiles: session.redactionProfiles,
+            }),
+          }
+        : {}),
+      ...(event.data !== undefined
+        ? {
+            data: redactSensitiveValue(event.data, {
+              redactionProfiles: session.redactionProfiles,
+            }),
+          }
+        : {}),
+    });
+    await runRecorder.flush();
+  }
+
   private async executeDeterministicCurrentSession(input: {
     readonly action: MagicBrowseDeterministicActionVerb;
     readonly sessionId?: string;
+    readonly viewportExpansion?: number;
+    readonly redactionProfiles?: ExactValueRedactionProfiles;
     readonly targetRef?: string;
+    readonly descriptorSignature?: string;
     readonly failureReason: MagicBrowseDeterministicActionBlockedReason;
+    readonly timeoutMs?: number;
+    readonly signal?: AbortSignal;
     readonly run: (context: {
       readonly session: PersistedMagicBrowseSession;
       readonly runRecorder: MagicBrowseRunRecorder;
@@ -1276,10 +1676,11 @@ export class MagicBrowseSessionManager {
         NativeBrowserDialogGuard,
         'lastDialog' | 'blockingDialog' | 'settle'
       >;
+      readonly observationLease?: TargetObservationLease;
     }) => Promise<MagicBrowseDeterministicActionResult>;
   }): Promise<MagicBrowseDeterministicActionResult> {
-    const session = await this.loadCurrentSessionForDeterministicAction(input.sessionId);
-    if (!session) {
+    const loadedSession = await this.loadCurrentSessionForDeterministicAction(input.sessionId);
+    if (!loadedSession) {
       return buildMagicBrowseDeterministicActionBlockedResult({
         action: input.action,
         reason: 'missing_session',
@@ -1287,74 +1688,256 @@ export class MagicBrowseSessionManager {
       });
     }
 
-    const runRecorder = await this.ensureSessionRun(session);
+    let session = loadedSession;
+    let runRecorder: MagicBrowseRunRecorder | undefined;
     let browser: Browser | undefined;
     let nativeDialog: NativeBrowserDialogGuard | undefined;
+    const disconnectCurrentBrowser = createDisconnectCurrentBrowser(() => browser);
+    const timeoutMs = normalizeBrowserActionTimeoutMs(
+      input.timeoutMs ?? this.browserActionTimeoutMs
+    );
+    let bufferedRunRecorder: BufferedRunRecorder | undefined;
 
     try {
-      browser = await this.connect(session, { runRecorder }).catch((error: unknown) => {
-        throw createDeadSessionError(error);
+      const prepared = await runWithBrowserActionDeadline(
+        async (signal) =>
+          withAbortedBrowserDisconnect(signal, disconnectCurrentBrowser, async () => {
+            session = await this.persistOperationRedactionProfiles(
+              loadedSession,
+              input.redactionProfiles
+            );
+            const claimed = await this.claimObservationLease(session, {
+              action: input.action,
+              targetRef: input.targetRef,
+              descriptorSignature: input.descriptorSignature,
+            });
+            session = claimed.session;
+            throwIfBrowserActionAborted(signal);
+            const operationBaseRunRecorder = await this.ensureSessionRun(session);
+            runRecorder = operationBaseRunRecorder;
+            throwIfBrowserActionAborted(signal);
+            bufferedRunRecorder = createBufferedRunRecorder(operationBaseRunRecorder, signal);
+            const operationRunRecorder = bufferedRunRecorder.recorder;
+            if (input.redactionProfiles) {
+              await operationRunRecorder.update({
+                redactionProfiles: input.redactionProfiles,
+              });
+              throwIfBrowserActionAborted(signal);
+            }
+            browser = await this.connect(session, {
+              runRecorder: operationRunRecorder,
+            }).catch((error: unknown) => {
+              throw createDeadSessionError(error);
+            });
+            throwIfBrowserActionAborted(signal);
+            const page = await resolveActivePage({
+              browser,
+              activePageIdentity: session.activePageIdentity,
+            });
+            throwIfBrowserActionAborted(signal);
+            await authenticateProxyIfNeeded(page, session.proxy);
+            throwIfBrowserActionAborted(signal);
+            const browserPage = new BrowserPage(
+              page,
+              {
+                displayHighlights: session.ownership === 'attached' || session.headless === false,
+                minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
+                ...(typeof input.viewportExpansion === 'number'
+                  ? { viewportExpansion: input.viewportExpansion }
+                  : {}),
+              },
+              INITIAL_BROWSER_TAB_ID
+            );
+            nativeDialog = attachNativeBrowserDialogGuard(page, {
+              runRecorder: operationRunRecorder,
+              redactionProfiles: session.redactionProfiles,
+              omitMessage: isProtectedDeterministicWrite(input.action),
+            });
+            throwIfBrowserActionAborted(signal);
+            const result = await input.run({
+              session,
+              runRecorder: operationRunRecorder,
+              page,
+              browserPage,
+              nativeDialog,
+              observationLease: claimed.lease,
+            });
+            throwIfBrowserActionAborted(signal);
+            const livePageIdentity = await readPageIdentity(page);
+            throwIfBrowserActionAborted(signal);
+            const activePageIdentity = isProtectedDeterministicWrite(input.action)
+              ? protectedWritePageIdentity(livePageIdentity, session.redactionProfiles)
+              : safePageIdentityForPersistence(livePageIdentity, session.redactionProfiles);
+            const updatedSession = touchPersistedMagicBrowseSession(session, {
+              runId: operationBaseRunRecorder.runId,
+              activePageIdentity,
+            });
+            await this.saveSessionIfCurrent(session, updatedSession);
+            throwIfBrowserActionAborted(signal);
+            return {
+              result: safePageMetadataResult(result, session.redactionProfiles),
+              activePageIdentity,
+            };
+          }),
+        {
+          actionName: input.action,
+          timeoutMs,
+          signal: input.signal,
+          cancel: disconnectCurrentBrowser,
+        }
+      );
+
+      await bufferedRunRecorder?.recorder.update({
+        activePageIdentity: prepared.activePageIdentity,
       });
-      const page = await resolveActivePage({
-        browser,
-        activePageIdentity: session.activePageIdentity,
-      });
-      await authenticateProxyIfNeeded(page, session.proxy);
-      const browserPage = new BrowserPage(page, {
-        displayHighlights: session.ownership === 'attached' || session.headless === false,
-        minimumWaitPageLoadTime: DEFAULT_GENERAL_SETTINGS.minWaitPageLoadTime,
-      });
-      nativeDialog = attachNativeBrowserDialogGuard(page, {
-        runRecorder,
-        redactionProfiles: session.redactionProfiles,
-      });
-      const result = await input.run({
-        session,
-        runRecorder,
-        page,
-        browserPage,
-        nativeDialog,
-      });
-      const updatedSession = touchPersistedMagicBrowseSession(session, {
-        runId: runRecorder.runId,
-        activePageIdentity: await readPageIdentity(page),
-      });
-      await this.store.saveCurrentSession(updatedSession);
-      await runRecorder.update({
-        activePageIdentity: updatedSession.activePageIdentity,
-      });
-      return result;
-    } catch {
-      await nativeDialog?.settle();
+      if (bufferedRunRecorder) {
+        await settleCleanup(bufferedRunRecorder.commit());
+      }
+      return prepared.result;
+    } catch (error) {
+      bufferedRunRecorder?.discard();
+      if (isBrowserActionDeadlineError(error)) {
+        if (!(error instanceof SessionAuthorityConflictError)) {
+          await this.fenceTimedOutOperation(session, runRecorder?.runId ?? session.runId);
+        }
+        const result = deadlineBlockedActionResult(input, error);
+        if (runRecorder) {
+          await settleCleanup(
+            runRecorder.append({
+              type: 'deterministic_action.timeout',
+              level: 'warn',
+              data: {
+                sessionId: session.id,
+                runId: runRecorder.runId,
+                action: result.action,
+                status: result.status,
+                targetRef: result.targetRef,
+                reason: result.reason,
+                retryable: result.retryable,
+                mutationState: result.mutationState,
+                recovery: result.recovery,
+              },
+            })
+          );
+        }
+        return result;
+      }
+      if (nativeDialog) {
+        await settleCleanup(nativeDialog.settle());
+      }
       const dialog = nativeDialog?.blockingDialog();
+      const browserDisconnected = isBrowserDisconnectedError(error);
       const result = buildMagicBrowseDeterministicActionBlockedResult({
         action: input.action,
-        reason: dialog ? 'browser_dialog_open' : input.failureReason,
+        reason: dialog
+          ? 'browser_dialog_open'
+          : browserDisconnected
+            ? 'browser_disconnected'
+            : input.failureReason,
         targetRef: input.targetRef,
         ...(dialog ? { dialog } : {}),
+        ...(browserDisconnected
+          ? {
+              retryable: true,
+              mutationState: 'unknown',
+              recovery: 'fresh_observe_required',
+            }
+          : {}),
       });
-      await runRecorder.append({
-        type: 'deterministic_action.blocked',
-        level: 'warn',
-        data: {
-          sessionId: session.id,
-          runId: runRecorder.runId,
-          action: result.action,
-          status: result.status,
-          targetRef: result.targetRef,
-          reason: result.reason,
-          dialog: result.dialog,
-          summary: result.summary,
-        },
-      });
+      if (runRecorder) {
+        await settleCleanup(
+          runRecorder.append({
+            type: 'deterministic_action.blocked',
+            level: 'warn',
+            data: {
+              sessionId: session.id,
+              runId: runRecorder.runId,
+              action: result.action,
+              status: result.status,
+              targetRef: result.targetRef,
+              reason: result.reason,
+              dialog: result.dialog,
+              summary: result.summary,
+            },
+          })
+        );
+      }
       return result;
     } finally {
       nativeDialog?.detach();
-      if (browser) {
-        await disconnectBrowser(browser);
+      await disconnectCurrentBrowser();
+      if (runRecorder) {
+        await settleCleanup(runRecorder.flush());
       }
-      await runRecorder.flush();
     }
+  }
+
+  private async invalidateSessionPageAuthority(
+    session: PersistedMagicBrowseSession,
+    runId?: string
+  ): Promise<boolean> {
+    return this.store.invalidateCurrentSessionPageAuthorityThroughRevision(
+      session.id,
+      persistedSessionRevision(session) + 1,
+      runId
+    );
+  }
+
+  private async fenceTimedOutOperation(
+    session: PersistedMagicBrowseSession,
+    runId?: string
+  ): Promise<void> {
+    const maxRevision = persistedSessionRevision(session) + 1;
+    await settleCleanup(
+      Promise.all([
+        this.invalidateSessionPageAuthority(session, runId),
+        this.agentStateStore.clearAgentStateThroughRevision(session.id, maxRevision),
+      ])
+    );
+  }
+
+  private async saveSessionIfCurrent(
+    current: PersistedMagicBrowseSession,
+    updated: PersistedMagicBrowseSession
+  ): Promise<void> {
+    const saved = await this.store.saveCurrentSessionIfRevision(
+      updated,
+      persistedSessionRevision(current)
+    );
+    if (!saved) {
+      throw new SessionAuthorityConflictError('session_authority_commit');
+    }
+  }
+
+  private async claimObservationLease(
+    session: PersistedMagicBrowseSession,
+    input: {
+      readonly action: MagicBrowseDeterministicActionVerb;
+      readonly targetRef?: string;
+      readonly descriptorSignature?: string;
+    }
+  ): Promise<{
+    readonly session: PersistedMagicBrowseSession;
+    readonly lease?: TargetObservationLease;
+  }> {
+    if (!input.descriptorSignature || !['click', 'fill', 'type', 'select'].includes(input.action)) {
+      return { session };
+    }
+    const index = (session.observationLeases ?? []).findIndex(
+      (lease) =>
+        lease.action === input.action &&
+        lease.descriptorSignature === input.descriptorSignature &&
+        (!input.targetRef || lease.targetRef === input.targetRef)
+    );
+    if (index < 0) return { session };
+    const lease = session.observationLeases?.[index];
+    if (!lease) return { session };
+    if (lease.consumed) return { session, lease };
+    const leases = [...(session.observationLeases ?? [])];
+    leases[index] = { ...lease, consumed: true };
+    const updated = touchPersistedMagicBrowseSession(session, { observationLeases: leases });
+    await this.saveSessionIfCurrent(session, updated);
+    return { session: updated, lease };
   }
 
   private async loadCurrentSessionForDeterministicAction(
@@ -1368,6 +1951,58 @@ export class MagicBrowseSessionManager {
       return undefined;
     }
     return session;
+  }
+
+  private async persistOperationRedactionProfiles(
+    session: PersistedMagicBrowseSession,
+    redactionProfiles: ExactValueRedactionProfiles | undefined
+  ): Promise<PersistedMagicBrowseSession> {
+    if (!redactionProfiles || Object.keys(redactionProfiles).length === 0) {
+      return session;
+    }
+
+    const profiledSession = touchPersistedMagicBrowseSession(session, {
+      redactionProfiles,
+    });
+    const mergedProfiles = profiledSession.redactionProfiles;
+    const activePageIdentity = profiledSession.activePageIdentity
+      ? safePageIdentityForPersistence(profiledSession.activePageIdentity, mergedProfiles)
+      : undefined;
+    const markerPageIdentity = profiledSession.humanVerificationResolved
+      ? safePageIdentityForPersistence(
+          profiledSession.humanVerificationResolved.pageIdentity,
+          mergedProfiles
+        )
+      : undefined;
+    const {
+      activePageIdentity: _activePageIdentity,
+      humanVerificationResolved: _marker,
+      ...base
+    } = profiledSession;
+    const updatedSession: PersistedMagicBrowseSession = {
+      ...base,
+      ...(activePageIdentity && hasPersistablePageIdentity(activePageIdentity)
+        ? { activePageIdentity }
+        : {}),
+      ...(profiledSession.humanVerificationResolved &&
+      markerPageIdentity &&
+      hasPersistablePageIdentity(markerPageIdentity)
+        ? {
+            humanVerificationResolved: {
+              ...profiledSession.humanVerificationResolved,
+              pageIdentity: markerPageIdentity,
+            },
+          }
+        : {}),
+    };
+    const saved = await this.store.saveCurrentSessionIfRevision(
+      updatedSession,
+      persistedSessionRevision(session)
+    );
+    if (!saved) {
+      throw new SessionAuthorityConflictError('redaction_profile_commit');
+    }
+    return updatedSession;
   }
 
   private async closeCurrentSession(input: {
@@ -1414,7 +2049,10 @@ export class MagicBrowseSessionManager {
         const browserConnectResult = await this.connectForOwnedClose(session);
         if (browserConnectResult.status === 'connected') {
           const browser = browserConnectResult.browser;
-          const closeResult = await closeBrowserWithTimeout(browser, OWNED_BROWSER_PUPPETEER_CLOSE_TIMEOUT_MS);
+          const closeResult = await closeBrowserWithTimeout(
+            browser,
+            OWNED_BROWSER_PUPPETEER_CLOSE_TIMEOUT_MS
+          );
           if (closeResult === 'closed') {
             await runRecorder.append({
               type: 'session.close.browser_closed',
@@ -1446,6 +2084,9 @@ export class MagicBrowseSessionManager {
           });
         }
         await this.launcher.close({ cdpUrl: session.cdpUrl, pid: session.pid });
+        // The per-session Chrome profile is dead weight once the browser is
+        // gone; without this every launch leaves its user-data directory behind.
+        await this.launcher.discardSessionProfile(session.id);
         await runRecorder.append({
           type: 'session.close.complete',
           data: { sessionId: session.id, runId: runRecorder.runId },
@@ -1472,7 +2113,7 @@ export class MagicBrowseSessionManager {
         data: { sessionId: session.id, runId: runRecorder.runId },
       });
       await runRecorder.update({ status: 'failed' });
-      throw error;
+      throw safeOperationError(error, session.redactionProfiles);
     } finally {
       await runRecorder.flush();
       await this.store.clearCurrentSession(session.id);
@@ -1501,15 +2142,21 @@ export class MagicBrowseSessionManager {
 
   private async connect(
     session: PersistedMagicBrowseSession,
-    options: { readonly runRecorder?: MagicBrowseRunRecorder; readonly actId?: string } = {}
+    options: {
+      readonly runRecorder?: MagicBrowseRunRecorder;
+      readonly actId?: string;
+    } = {}
   ): Promise<Browser> {
     if (isBrowserbaseSession(session)) {
       await assertBrowserbaseSessionStillConnectable(session, this.resolveBrowserbaseClient());
       const client = this.resolveClient(session.stealth);
-      return client.connect(this.buildConnectOptions(session, { browserWSEndpoint: session.cdpUrl }));
-    } else {
-      await assertSessionEndpointStillMatches(session);
+      return client.connect(
+        this.buildConnectOptions(session, {
+          browserWSEndpoint: session.cdpUrl,
+        })
+      );
     }
+    await assertSessionEndpointStillMatches(session);
 
     if (shouldPreferLocalCdpFallbackConnect(session)) {
       try {
@@ -1564,7 +2211,10 @@ export class MagicBrowseSessionManager {
 
   private async connectLocalCdpFallbackAndRecord(
     session: PersistedMagicBrowseSession,
-    options: { readonly runRecorder?: MagicBrowseRunRecorder; readonly actId?: string },
+    options: {
+      readonly runRecorder?: MagicBrowseRunRecorder;
+      readonly actId?: string;
+    },
     event: {
       readonly eventType:
         | 'browser_connect.initial_targets_recovered'
@@ -1578,7 +2228,10 @@ export class MagicBrowseSessionManager {
       defaultViewport: connectDefaultViewport(session),
       protocolTimeoutMs: LOCAL_CDP_FALLBACK_PROTOCOL_TIMEOUT_MS,
     });
-    const activePageIdentity = await waitForRecoverablePageIdentity(browser, session.activePageIdentity);
+    const activePageIdentity = await waitForRecoverablePageIdentity(
+      browser,
+      session.activePageIdentity
+    );
     await options.runRecorder?.append({
       type: event.eventType,
       level: event.eventType === 'browser_connect.initial_targets_recovered' ? 'warn' : 'info',
@@ -1604,15 +2257,22 @@ export class MagicBrowseSessionManager {
     session: PersistedMagicBrowseSession,
     preference: PersistedMagicBrowseSession['localCdpConnectPreference'] | null
   ): Promise<PersistedMagicBrowseSession> {
-    const updatedSession = touchPersistedMagicBrowseSession(session, {
+    let updatedSession = touchPersistedMagicBrowseSession(session, {
       localCdpConnectPreference: preference,
     });
+    updatedSession = {
+      ...updatedSession,
+      ...(session.revision !== undefined ? { revision: session.revision } : {}),
+    };
+    if (session.revision === undefined) {
+      const { revision: _revision, ...withoutRevision } = updatedSession;
+      updatedSession = withoutRevision;
+    }
     const mutableSession = session as MutablePersistedMagicBrowseSession;
     Object.assign(mutableSession, updatedSession);
     if (!updatedSession.localCdpConnectPreference) {
       delete mutableSession.localCdpConnectPreference;
     }
-    await this.store.saveCurrentSession(updatedSession);
     return updatedSession;
   }
 
@@ -1627,7 +2287,9 @@ export class MagicBrowseSessionManager {
       .then(async () => {
         if (this.puppeteer) {
           return await client.connect(
-            this.buildConnectOptions(session, { browserWSEndpoint: session.cdpUrl })
+            this.buildConnectOptions(session, {
+              browserWSEndpoint: session.cdpUrl,
+            })
           );
         }
 
@@ -1654,11 +2316,14 @@ export class MagicBrowseSessionManager {
         clearTimeout(timeout);
       }
       if (result.status !== 'connected') {
-        void connectTask.then(async (lateResult) => {
-          if (lateResult.status === 'connected') {
-            await disconnectBrowser(lateResult.browser);
-          }
-        }, () => undefined);
+        void connectTask.then(
+          async (lateResult) => {
+            if (lateResult.status === 'connected') {
+              await disconnectBrowser(lateResult.browser);
+            }
+          },
+          () => undefined
+        );
       }
     }
   }
@@ -1685,13 +2350,18 @@ export class MagicBrowseSessionManager {
       .then(async () => {
         if (this.puppeteer) {
           if (isBrowserbaseSession(session)) {
-            await assertBrowserbaseSessionStillConnectable(session, this.resolveBrowserbaseClient());
+            await assertBrowserbaseSessionStillConnectable(
+              session,
+              this.resolveBrowserbaseClient()
+            );
           } else {
             await assertSessionEndpointStillMatches(session);
           }
           const client = this.resolveClient(session.stealth);
           return await client.connect(
-            this.buildConnectOptions(session, { browserWSEndpoint: session.cdpUrl })
+            this.buildConnectOptions(session, {
+              browserWSEndpoint: session.cdpUrl,
+            })
           );
         }
 
@@ -1725,11 +2395,14 @@ export class MagicBrowseSessionManager {
         clearTimeout(timeout);
       }
       if (result.status !== 'connected') {
-        void connectTask.then(async (lateResult) => {
-          if (lateResult.status === 'connected') {
-            await disconnectBrowser(lateResult.browser);
-          }
-        }, () => undefined);
+        void connectTask.then(
+          async (lateResult) => {
+            if (lateResult.status === 'connected') {
+              await disconnectBrowser(lateResult.browser);
+            }
+          },
+          () => undefined
+        );
       }
     }
   }
@@ -1772,9 +2445,7 @@ export class MagicBrowseSessionManager {
       ...(session.humanVerificationResolved
         ? { humanVerificationResolved: session.humanVerificationResolved }
         : {}),
-      ...(session.redactionProfiles
-        ? { redactionProfiles: session.redactionProfiles }
-        : {}),
+      ...(session.redactionProfiles ? { redactionProfiles: session.redactionProfiles } : {}),
       observe: (options = {}) => this.observe({ ...options, sessionId: session.id }),
       act: (options) => this.act({ ...options, sessionId: session.id }),
       markCaptchaResolved: (options = {}) =>
@@ -1790,8 +2461,10 @@ export class MagicBrowseSessionManager {
     };
   }
 
-  private async ensureSessionRun(session: PersistedMagicBrowseSession): Promise<MagicBrowseRunRecorder> {
-    return this.runStore.getOrCreateSessionRun({
+  private async ensureSessionRun(
+    session: PersistedMagicBrowseSession
+  ): Promise<MagicBrowseRunRecorder> {
+    const runRecorder = await this.runStore.getOrCreateSessionRun({
       sessionId: session.id,
       runId: session.runId,
       ownership: session.ownership,
@@ -1802,6 +2475,12 @@ export class MagicBrowseSessionManager {
       activePageIdentity: session.activePageIdentity,
       redactionProfiles: session.redactionProfiles,
     });
+    if (session.redactionProfiles && Object.keys(session.redactionProfiles).length > 0) {
+      await runRecorder.update({
+        redactionProfiles: session.redactionProfiles,
+      });
+    }
+    return runRecorder;
   }
 
   private async finishStatus(
@@ -1809,9 +2488,13 @@ export class MagicBrowseSessionManager {
     session: PersistedMagicBrowseSession,
     result: MagicBrowseStatusResult
   ): Promise<MagicBrowseStatusResult> {
-    const redactedResult = redactSensitiveValue(result, {
-      redactionProfiles: session.redactionProfiles,
-    }) as MagicBrowseStatusResult;
+    const safeResult = safeStatusPageMetadata(result, session.redactionProfiles);
+    const redactedResult = {
+      ...(redactSensitiveValue(safeResult, {
+        redactionProfiles: session.redactionProfiles,
+      }) as MagicBrowseStatusResult),
+      ...preservedMachineIdentityFields(safeResult),
+    } as MagicBrowseStatusResult;
     await runRecorder.append({
       type: 'status.complete',
       data: redactedResult,
@@ -1820,12 +2503,181 @@ export class MagicBrowseSessionManager {
   }
 }
 
-function isBrowserbaseSession(
-  session: PersistedMagicBrowseSession
-): session is PersistedMagicBrowseSession & {
-  readonly cloudProvider: NonNullable<PersistedMagicBrowseSession['cloudProvider']>;
-} {
-  return session.cloudProvider?.name === 'browserbase';
+function mergeObservationLeases(
+  existing: PersistedMagicBrowseSession['observationLeases'],
+  observed: PersistedMagicBrowseSession['observationLeases']
+): NonNullable<PersistedMagicBrowseSession['observationLeases']> {
+  const retained = [...(existing ?? [])].filter((lease) => !lease.consumed);
+  const keys = new Set(
+    retained.map(
+      (lease) =>
+        `${lease.pageRef}:${lease.documentRef}:${lease.action}:${lease.descriptorSignature}`
+    )
+  );
+  for (const lease of observed ?? []) {
+    const key = `${lease.pageRef}:${lease.documentRef}:${lease.action}:${lease.descriptorSignature}`;
+    if (!keys.has(key)) {
+      retained.push(lease);
+      keys.add(key);
+    }
+  }
+  return retained.slice(0, 1024);
+}
+
+function isProtectedDeterministicWrite(action: MagicBrowseDeterministicActionVerb): boolean {
+  return action === 'fill' || action === 'type' || action === 'select';
+}
+
+function safePageIdentityForPersistence(
+  identity: MagicBrowseActivePageIdentity,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): MagicBrowseActivePageIdentity {
+  if (!redactionProfiles || Object.keys(redactionProfiles).length === 0) {
+    return identity;
+  }
+
+  const safeUrl = identity.url
+    ? safePageUrlForPersistence(identity.url, redactionProfiles)
+    : undefined;
+  return {
+    ...(identity.targetId ? { targetId: identity.targetId } : {}),
+    ...(identity.documentRef ? { documentRef: identity.documentRef } : {}),
+    ...(safeUrl ? { url: safeUrl } : {}),
+  };
+}
+
+function hasPersistablePageIdentity(identity: MagicBrowseActivePageIdentity): boolean {
+  return Boolean(identity.targetId || identity.documentRef || identity.url);
+}
+
+function safeStatusPageMetadata(
+  result: MagicBrowseStatusResult,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): MagicBrowseStatusResult {
+  return safePageMetadataResult(result, redactionProfiles);
+}
+
+// Machine identifiers are never user content. Redacting them corrupts the
+// equality checks callers run on them — a short protected value once rewrote
+// the digits inside `sessionId`, so a caller's liveness check compared a
+// mangled id and declared a healthy browser unavailable.
+const MACHINE_IDENTITY_RESULT_FIELDS = ['sessionId', 'runId', 'pageRef'] as const;
+
+function preservedMachineIdentityFields(result: object): Record<string, string> {
+  const preserved: Record<string, string> = {};
+  for (const key of MACHINE_IDENTITY_RESULT_FIELDS) {
+    const value = (result as Record<string, unknown>)[key];
+    if (typeof value === 'string') {
+      preserved[key] = value;
+    }
+  }
+  return preserved;
+}
+
+function safePageMetadataResult<T extends { readonly url?: string; readonly title?: string }>(
+  result: T,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): T {
+  if (!redactionProfiles || Object.keys(redactionProfiles).length === 0) {
+    return result;
+  }
+
+  const { url, title: _title, ...rest } = result;
+  const redacted = redactSensitiveValue(rest, { redactionProfiles }) as T;
+  const safeUrl = url ? safePageUrlForPersistence(url, redactionProfiles) : undefined;
+  return {
+    ...redacted,
+    ...preservedMachineIdentityFields(result),
+    ...(safeUrl ? { url: safeUrl } : {}),
+  };
+}
+
+function safeActResult(
+  result: MagicBrowseActResult,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): MagicBrowseActResult {
+  if (!redactionProfiles || Object.keys(redactionProfiles).length === 0) {
+    return result;
+  }
+
+  const redacted = redactSensitiveValue(result, {
+    redactionProfiles,
+  }) as MagicBrowseActResult;
+  return {
+    ...redacted,
+    finalUrl: safePageUrlForPersistence(result.finalUrl, redactionProfiles) ?? '',
+  };
+}
+
+function protectedWritePageIdentity(
+  identity: MagicBrowseActivePageIdentity,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): MagicBrowseActivePageIdentity {
+  if (redactionProfiles && Object.keys(redactionProfiles).length > 0) {
+    return safePageIdentityForPersistence(identity, redactionProfiles);
+  }
+
+  return {
+    ...(identity.targetId ? { targetId: identity.targetId } : {}),
+    ...(identity.documentRef ? { documentRef: identity.documentRef } : {}),
+  };
+}
+
+function safePageUrlForPersistence(
+  value: string,
+  redactionProfiles: ExactValueRedactionProfiles
+): string | undefined {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return undefined;
+    }
+    if (pathMayContainProtectedValue(parsed.pathname, redactionProfiles)) {
+      return undefined;
+    }
+
+    const safeUrl = `${parsed.origin}${parsed.pathname}`;
+    return redactSensitiveText(safeUrl, { redactionProfiles }) === safeUrl ? safeUrl : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pathMayContainProtectedValue(
+  pathname: string,
+  redactionProfiles: ExactValueRedactionProfiles
+): boolean {
+  let candidate = pathname;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (redactSensitiveText(candidate, { redactionProfiles }) !== candidate) {
+      return true;
+    }
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(candidate);
+    } catch {
+      return true;
+    }
+    if (decoded === candidate) {
+      return false;
+    }
+    candidate = decoded;
+  }
+  return true;
+}
+
+function safeOperationError(
+  error: unknown,
+  redactionProfiles: ExactValueRedactionProfiles | undefined
+): unknown {
+  if (!redactionProfiles || Object.keys(redactionProfiles).length === 0) {
+    return error;
+  }
+  return new Error(
+    redactSensitiveText(errorToMessage(error), {
+      redactionProfiles,
+    })
+  );
 }
 
 function cloudProviderFromBrowserbaseSession(
@@ -1870,7 +2722,9 @@ function browserbaseStatusCanConnect(status: BrowserbaseSession['status']): bool
   return status === 'PENDING' || status === 'RUNNING';
 }
 
-async function assertSessionEndpointStillMatches(session: PersistedMagicBrowseSession): Promise<void> {
+async function assertSessionEndpointStillMatches(
+  session: PersistedMagicBrowseSession
+): Promise<void> {
   const probe = await probeCdpEndpoint(session.cdpUrl, session.browserInstanceRef);
 
   if (probe === 'match') {
@@ -1886,6 +2740,181 @@ async function assertSessionEndpointStillMatches(session: PersistedMagicBrowseSe
   throw new Error(`CDP endpoint is unreachable for persisted session ${session.id}.`);
 }
 
+function deadlineBlockedActionResult(
+  input: {
+    readonly action: MagicBrowseDeterministicActionVerb;
+    readonly targetRef?: string;
+  },
+  error: BrowserActionDeadlineError
+): MagicBrowseDeterministicActionResult {
+  return buildMagicBrowseDeterministicActionBlockedResult({
+    action: input.action,
+    reason: error.code,
+    targetRef: input.targetRef,
+    retryable: true,
+    mutationState: 'unknown',
+    recovery: 'fresh_observe_required',
+  });
+}
+
+function deadlineActResult(error: BrowserActionDeadlineError): MagicBrowseActResult {
+  return {
+    status: error.code === 'action_timeout' ? 'timed_out' : 'cancelled',
+    steps: [],
+    finalUrl: '',
+    finalMessage: error.code,
+    retryable: true,
+    mutationState: 'unknown',
+    recovery: 'fresh_observe_required',
+  };
+}
+
+function throwIfBrowserActionAborted(signal: AbortSignal): void {
+  if (!signal.aborted) {
+    return;
+  }
+  if (signal.reason instanceof Error) {
+    throw signal.reason;
+  }
+  throw new BrowserActionDeadlineError('action_cancelled', 'browser_action');
+}
+
+async function withAbortedBrowserDisconnect<T>(
+  signal: AbortSignal,
+  disconnect: () => Promise<void>,
+  operation: () => Promise<T>
+): Promise<T> {
+  try {
+    return await operation();
+  } finally {
+    if (signal.aborted) {
+      await disconnect();
+    }
+  }
+}
+
+interface BufferedRunRecorder {
+  readonly recorder: MagicBrowseRunRecorder;
+  commit(): Promise<void>;
+  discard(): void;
+}
+
+type BufferedRunMutation =
+  | { readonly kind: 'append'; readonly event: MagicBrowseRunEventInput }
+  | { readonly kind: 'update'; readonly input: MagicBrowseRunUpdateInput };
+
+function createBufferedRunRecorder(
+  runRecorder: MagicBrowseRunRecorder,
+  signal: AbortSignal
+): BufferedRunRecorder {
+  const mutations: BufferedRunMutation[] = [];
+  let accepting = !signal.aborted;
+  const discard = () => {
+    accepting = false;
+    mutations.length = 0;
+  };
+  signal.addEventListener('abort', discard, { once: true });
+
+  const recorder: MagicBrowseRunRecorder = {
+    runId: runRecorder.runId,
+    sessionId: runRecorder.sessionId,
+    append: async (event) => {
+      if (accepting && !signal.aborted) {
+        mutations.push({ kind: 'append', event });
+      }
+    },
+    update: async (input) => {
+      if (accepting && !signal.aborted) {
+        mutations.push({ kind: 'update', input });
+      }
+    },
+    createDebugSink: (actId) => ({
+      write: (line) => {
+        if (accepting && !signal.aborted) {
+          mutations.push({
+            kind: 'append',
+            event: {
+              type: 'debug.line',
+              level: 'debug',
+              message: line,
+              ...(actId ? { actId } : {}),
+            },
+          });
+        }
+      },
+    }),
+    flush: async () => undefined,
+  };
+
+  return {
+    recorder,
+    discard,
+    async commit() {
+      if (!accepting || signal.aborted) {
+        discard();
+        return;
+      }
+      accepting = false;
+      signal.removeEventListener('abort', discard);
+      const pending = mutations.splice(0);
+      for (const mutation of pending) {
+        if (mutation.kind === 'append') {
+          await runRecorder.append(mutation.event);
+        } else {
+          await runRecorder.update(mutation.input);
+        }
+      }
+    },
+  };
+}
+
+function createDisconnectCurrentBrowser(
+  readBrowser: () => Browser | undefined
+): () => Promise<void> {
+  let disconnectedBrowser: Browser | undefined;
+  let disconnectTask: Promise<void> | undefined;
+  return async () => {
+    const browser = readBrowser();
+    if (!browser) {
+      return;
+    }
+    if (browser !== disconnectedBrowser) {
+      disconnectedBrowser = browser;
+      disconnectTask = disconnectBrowser(browser);
+    }
+    await disconnectTask;
+  };
+}
+
+function isBrowserDisconnectedError(error: unknown): boolean {
+  return /browser.*disconnect|target closed|session closed|connection closed/i.test(
+    errorToMessage(error)
+  );
+}
+
+async function settleCleanup(
+  task: Promise<unknown>,
+  timeoutMs = BROWSER_OPERATION_CLEANUP_TIMEOUT_MS
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settledTask = Promise.resolve(task).then(
+    () => undefined,
+    () => undefined
+  );
+  const timeoutTask = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([settledTask, timeoutTask]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    void settledTask.catch(() => undefined);
+  }
+}
+
 export function createMagicBrowseSessionManager(
   options: MagicBrowseSessionManagerOptions = {}
 ): MagicBrowseSessionManager {
@@ -1893,11 +2922,7 @@ export function createMagicBrowseSessionManager(
 }
 
 async function disconnectBrowser(browser: Browser): Promise<void> {
-  try {
-    await browser.disconnect();
-  } catch {
-    // Already disconnected.
-  }
+  await settleCleanup(disconnectBrowserOnce(browser));
 }
 
 async function connectLocalCdpWithoutInitialTargetWait(
@@ -1938,15 +2963,18 @@ async function connectLocalCdpWithoutInitialTargetWait(
 function connectDefaultViewport(
   session: PersistedMagicBrowseSession
 ): ConnectOptions['defaultViewport'] {
-  return session.viewport ? { width: session.viewport.width, height: session.viewport.height } : null;
+  return session.viewport
+    ? { width: session.viewport.width, height: session.viewport.height }
+    : null;
 }
 
-function shouldPreferLocalCdpFallbackConnect(session: PersistedMagicBrowseSession): session is
-  PersistedMagicBrowseSession & {
-    readonly localCdpConnectPreference: NonNullable<
-      PersistedMagicBrowseSession['localCdpConnectPreference']
-    >;
-  } {
+function shouldPreferLocalCdpFallbackConnect(
+  session: PersistedMagicBrowseSession
+): session is PersistedMagicBrowseSession & {
+  readonly localCdpConnectPreference: NonNullable<
+    PersistedMagicBrowseSession['localCdpConnectPreference']
+  >;
+} {
   return session.localCdpConnectPreference?.strategy === LOCAL_CDP_FALLBACK_STRATEGY;
 }
 
@@ -2074,240 +3102,6 @@ function createDeadSessionError(error: unknown): Error {
   );
 }
 
-function summarizeSession(session: PersistedMagicBrowseSession): Record<string, unknown> {
-  return {
-    sessionId: session.id,
-    runId: session.runId,
-    ownership: session.ownership,
-    cloudProvider: session.cloudProvider,
-    cdpUrl: isBrowserbaseSession(session) ? '[REDACTED_BROWSERBASE_CONNECT_URL]' : session.cdpUrl,
-    pid: session.pid,
-    profile: session.profile,
-    activePageIdentity: session.activePageIdentity,
-    headless: session.headless,
-    viewport: session.viewport,
-    userAgent: session.userAgent,
-    proxy: session.proxy ? redactSensitiveValue(session.proxy) : undefined,
-    stealth: session.stealth,
-    humanVerificationResolved: session.humanVerificationResolved,
-    redactionProfiles: session.redactionProfiles,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-  };
-}
-
-function normalizeMarkerTtlSeconds(value: number | undefined): number {
-  if (value === undefined) {
-    return DEFAULT_HUMAN_VERIFICATION_RESOLVED_TTL_SECONDS;
-  }
-  if (!Number.isFinite(value) || value <= 0) {
-    throw new Error('magicbrowse mark-captcha-resolved --ttl must be a positive number of seconds.');
-  }
-  return value;
-}
-
-function resolveTrustedHumanVerificationEvidence(input: {
-  readonly marker: MagicBrowseHumanVerificationResolvedMarker | undefined;
-  readonly currentPageIdentity: PersistedMagicBrowseSession['activePageIdentity'];
-  readonly now: Date;
-}): {
-  readonly evidence?: MagicBrowseTrustedRuntimeEvidence;
-  readonly clearReason?: 'consumed' | 'expired' | 'page_mismatch';
-} {
-  if (!input.marker) {
-    return {};
-  }
-
-  if (Date.parse(input.marker.expiresAt) <= input.now.getTime()) {
-    return { clearReason: 'expired' };
-  }
-
-  if (!humanVerificationMarkerMatchesPage(input.marker, input.currentPageIdentity)) {
-    return { clearReason: 'page_mismatch' };
-  }
-
-  return {
-    evidence: input.marker,
-    clearReason: 'consumed',
-  };
-}
-
-function humanVerificationMarkerMatchesPage(
-  marker: MagicBrowseHumanVerificationResolvedMarker,
-  currentPageIdentity: PersistedMagicBrowseSession['activePageIdentity']
-): boolean {
-  if (!currentPageIdentity) {
-    return false;
-  }
-
-  if (
-    marker.pageIdentity.targetId &&
-    currentPageIdentity.targetId &&
-    marker.pageIdentity.targetId === currentPageIdentity.targetId
-  ) {
-    return true;
-  }
-
-  const markerUrl = normalizeComparableUrl(marker.pageIdentity.url);
-  const currentUrl = normalizeComparableUrl(currentPageIdentity.url);
-  return Boolean(markerUrl && currentUrl && markerUrl === currentUrl);
-}
-
-function normalizeComparableUrl(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  try {
-    return new URL(value).toString();
-  } catch {
-    return value;
-  }
-}
-
-function statusSessionMetadata(
-  session: PersistedMagicBrowseSession,
-  runId: string | undefined
-): Pick<MagicBrowseStatusResult, 'sessionId' | 'runId' | 'ownership' | 'cloudProvider'> {
-  return {
-    sessionId: session.id,
-    ...(runId ? { runId } : {}),
-    ownership: session.ownership,
-    ...(session.cloudProvider ? { cloudProvider: session.cloudProvider } : {}),
-  };
-}
-
-function buildAliveStatusResult(
-  session: PersistedMagicBrowseSession,
-  runId: string | undefined,
-  activePageIdentity: MagicBrowseActivePageIdentity | undefined,
-  options: {
-    readonly currentPageUnresolved?: true;
-    readonly diagnosticReason?: MagicBrowseStatusResult['diagnosticReason'];
-  } = {}
-): MagicBrowseStatusResult {
-  return {
-    ...statusSessionMetadata(session, runId),
-    success: true,
-    alive: true,
-    outcomeType: 'browser_alive',
-    ...(activePageIdentity?.targetId ? { pageRef: `tab:${activePageIdentity.targetId}` } : {}),
-    ...(activePageIdentity?.url ? { url: activePageIdentity.url } : {}),
-    ...(activePageIdentity?.title ? { title: activePageIdentity.title } : {}),
-    ...(options.currentPageUnresolved ? { currentPageUnresolved: true } : {}),
-    ...(options.diagnosticReason ? { diagnosticReason: options.diagnosticReason } : {}),
-  };
-}
-
-async function readConnectedStatusPageIdentityWithTimeout(
-  browser: Browser,
-  activePageIdentity: MagicBrowseActivePageIdentity | undefined
-): Promise<StatusPageIdentityResolution> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const resolutionTask = Promise.resolve()
-    .then(async (): Promise<StatusPageIdentityResolution> => {
-      const resolution = await resolveActivePageForDiagnostics({
-        browser,
-        activePageIdentity,
-      });
-
-      if (!resolution?.confident) {
-        return { status: 'unresolved' };
-      }
-
-      return {
-        status: 'resolved',
-        activePageIdentity: await readPageIdentity(resolution.page),
-      };
-    })
-    .catch((): StatusPageIdentityResolution => ({ status: 'failed' }));
-  const timeoutTask = new Promise<{ readonly status: 'timed_out' }>((resolve) => {
-    timeout = setTimeout(
-      () => resolve({ status: 'timed_out' as const }),
-      DIAGNOSTIC_PAGE_RESOLUTION_TIMEOUT_MS
-    );
-  });
-
-  try {
-    return await Promise.race([resolutionTask, timeoutTask]);
-  } finally {
-    if (timeout) {
-      clearTimeout(timeout);
-    }
-    void resolutionTask.catch(() => undefined);
-  }
-}
-
-async function readPageIdentityFromCdpList(
-  session: PersistedMagicBrowseSession
-): Promise<MagicBrowseActivePageIdentity | undefined> {
-  const listUrl = buildCdpHttpEndpointUrl(session.cdpUrl, '/json/list');
-
-  if (!listUrl) {
-    return undefined;
-  }
-
-  try {
-    const response = await fetch(listUrl);
-
-    if (!response.ok) {
-      return undefined;
-    }
-
-    const payload = await response.json();
-
-    if (!Array.isArray(payload)) {
-      return undefined;
-    }
-
-    const targets = payload.map(parseCdpPageTarget).filter((target) => target !== undefined);
-    const persistedTargetId = session.activePageIdentity?.targetId;
-    const byPersistedTarget = persistedTargetId
-      ? targets.find((target) => target.targetId === persistedTargetId)
-      : undefined;
-    return byPersistedTarget ?? targets.find((target) => isMeaningfulHttpPageUrl(target.url));
-  } catch {
-    return undefined;
-  }
-}
-
-function parseCdpPageTarget(value: unknown): MagicBrowseActivePageIdentity | undefined {
-  const record = asRecord(value);
-
-  if (!record || stringValue(record.type) !== 'page') {
-    return undefined;
-  }
-
-  const targetId = stringValue(record.id) ?? stringValue(record.targetId);
-  const url = stringValue(record.url);
-  const title = stringValue(record.title);
-
-  if (!targetId && !url && !title) {
-    return undefined;
-  }
-
-  return {
-    ...(targetId ? { targetId } : {}),
-    ...(url ? { url } : {}),
-    ...(title ? { title } : {}),
-  };
-}
-
-function isMeaningfulHttpPageUrl(url: string | undefined): boolean {
-  const normalized = url?.trim().toLowerCase() ?? '';
-  return normalized.startsWith('http://') || normalized.startsWith('https://');
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
-}
-
 function errorToMessage(error: unknown): string {
-  return error instanceof Error ? error.stack ?? error.message : String(error);
+  return error instanceof Error ? (error.stack ?? error.message) : String(error);
 }

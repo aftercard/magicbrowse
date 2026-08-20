@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -38,6 +39,12 @@ export interface OwnedBrowserCloseInput {
 export interface OwnedBrowserLauncher {
   launch(input: OwnedBrowserLaunchInput): Promise<OwnedBrowserLaunchResult>;
   close(input: OwnedBrowserCloseInput): Promise<void>;
+  /**
+   * Removes the Chrome profile this launcher derived for a session. A profile
+   * the caller named explicitly keeps its directory, so logged-in state stays
+   * reusable; only the per-session directory is discarded.
+   */
+  discardSessionProfile(sessionId: string): Promise<void>;
 }
 
 export interface DetachedChromeBrowserLauncherOptions {
@@ -204,6 +211,20 @@ export function createDetachedChromeBrowserLauncher(
           `Owned browser endpoint${port ? ` on port ${port}` : ''} remained reachable after close attempts (termination=${termination}).`
         );
       }
+    },
+    async discardSessionProfile(sessionId) {
+      const name = sessionId.trim();
+      if (!name) {
+        return;
+      }
+      const profileDir = join(
+        options.magicBrowseHome ?? resolveMagicBrowseHome({ env, homeDir: options.homeDir }),
+        BROWSER_PROFILES_DIRNAME,
+        encodeURIComponent(name)
+      );
+      // Best effort: a leftover profile costs disk, but failing to remove one
+      // must never turn a successful close into an error.
+      await rm(profileDir, { recursive: true, force: true }).catch(() => undefined);
     },
   };
 }

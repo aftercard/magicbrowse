@@ -59,6 +59,30 @@ export class ChatModelForbiddenError extends Error {
 }
 
 /**
+ * Chat model payment/credit errors. Gateways surface provider 402s (e.g.
+ * OpenRouter "insufficient credits") wrapped in 502 "LLM provider error"
+ * responses, so retrying can never succeed until the provider account is
+ * funded — this must terminate the run instead of burning the retry budget.
+ */
+export class ChatModelPaymentError extends Error {
+  constructor(
+    message: string,
+    public readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'ChatModelPaymentError';
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, ChatModelPaymentError);
+    }
+  }
+
+  toString(): string {
+    return `${this.name}: ${this.message}${this.cause ? ` (Caused by: ${this.cause})` : ''}`;
+  }
+}
+
+/**
  * Custom error class for chat model bad request errors (400)
  */
 export class ChatModelBadRequestError extends Error {
@@ -121,6 +145,38 @@ export function isAuthenticationError(error: unknown): boolean {
     errorMessage.toLowerCase().includes('authentication') ||
     errorMessage.includes(' 401') ||
     errorMessage.toLowerCase().includes('api key')
+  );
+}
+
+/**
+ * Checks if an error is a provider payment/credit rejection. Matches both a
+ * direct provider 402 and the gateway shape that wraps the provider 402 in a
+ * 502 body carrying `upstreamStatus`/`provider_error` details.
+ */
+export function isProviderPaymentError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+
+  const parts: string[] = [error.message || ''];
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    parts.push(cause.message || '');
+  }
+  // OpenAI-compatible client errors carry the parsed response body on `error`.
+  const body = (error as { error?: unknown }).error;
+  if (body !== undefined && body !== null) {
+    try {
+      parts.push(JSON.stringify(body));
+    } catch {
+      // Non-serializable body carries no signal.
+    }
+  }
+
+  const text = parts.join(' ').toLowerCase();
+  return (
+    text.includes('insufficient credits') ||
+    text.includes('requires more credits') ||
+    text.includes('"upstreamstatus":402') ||
+    (text.includes(' 402') && text.includes('credit'))
   );
 }
 
@@ -222,6 +278,20 @@ export class ExtensionConflictError extends Error {
    */
   toString(): string {
     return `${this.name}: ${this.message}${this.cause ? ` (Caused by: ${this.cause})` : ''}`;
+  }
+}
+
+export const REPEATED_STALE_TARGET_MESSAGE =
+  'The page repeatedly changed the requested target before execution. No action was performed.';
+
+export class RepeatedStaleTargetError extends Error {
+  constructor() {
+    super(REPEATED_STALE_TARGET_MESSAGE);
+    this.name = 'RepeatedStaleTargetError';
+
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, RepeatedStaleTargetError);
+    }
   }
 }
 

@@ -18,8 +18,15 @@ import {
 import { isUrlAllowed } from '../vendor/browser/util.js';
 import { createLogger } from '../adapter/logger.js';
 import { isTransientPuppeteerContextError } from '../vendor/browser/puppeteer-errors.js';
+import { disconnectBrowserOnce } from '../runtime/browser-action-deadline.js';
 
 const logger = createLogger('BrowserContext');
+const PAGE_CLOSE_TIMEOUT_MS = 1_000;
+
+// BrowserContext gives the operation's explicitly selected page the first
+// synthetic tab id. Observe descriptors and later deterministic actions must
+// use this same operation-local identity even though they reconnect over CDP.
+export const INITIAL_BROWSER_TAB_ID = 1;
 
 export class BrowserContext {
   private _browser: Browser;
@@ -28,7 +35,7 @@ export class BrowserContext {
   private _puppeteerPageByTabId: Map<number, PuppeteerPage> = new Map();
   private _tabIdByPuppeteerPage: WeakMap<PuppeteerPage, number> = new WeakMap();
   private _currentTabId: number | null = null;
-  private _nextTabId = 1;
+  private _nextTabId = INITIAL_BROWSER_TAB_ID;
 
   constructor(
     browser: Browser,
@@ -148,7 +155,11 @@ export class BrowserContext {
     }
     if (puppeteerPage) {
       try {
-        await puppeteerPage.close();
+        const close = puppeteerPage.close();
+        await Promise.race([
+          close,
+          new Promise<void>((resolve) => setTimeout(resolve, PAGE_CLOSE_TIMEOUT_MS)),
+        ]);
       } catch (err) {
         logger.warning('closeTab puppeteerPage.close failed', err);
       }
@@ -233,7 +244,10 @@ export class BrowserContext {
     return { ...pageState, tabs };
   }
 
-  async getCachedState(useVision = false, cacheClickableElementsHashes = false): Promise<BrowserState> {
+  async getCachedState(
+    useVision = false,
+    cacheClickableElementsHashes = false
+  ): Promise<BrowserState> {
     await this._syncBrowserPages();
     const page = await this.getCurrentPage();
     let pageState = page.getCachedState();
@@ -249,6 +263,15 @@ export class BrowserContext {
     const page = this._attachedPages.get(this._currentTabId);
     if (!page) return;
     await page.removeHighlight();
+  }
+
+  /**
+   * Disconnect this operation's transient CDP client without closing Chrome.
+   * Pending Puppeteer commands reject after disconnect, which prevents a
+   * timed-out action from continuing alongside a later fresh observation.
+   */
+  async cancelPendingOperations(): Promise<void> {
+    await disconnectBrowserOnce(this._browser);
   }
 
   /**

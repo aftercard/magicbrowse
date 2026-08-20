@@ -18,6 +18,7 @@ export type MagicBrowseProxySetting = string | MagicBrowseProxyConfig;
 
 export interface MagicBrowseActivePageIdentity {
   readonly targetId?: string;
+  readonly documentRef?: string;
   readonly url?: string;
   readonly title?: string;
 }
@@ -116,6 +117,11 @@ export interface MagicBrowseObserveOptions {
   readonly sessionId?: string;
   readonly includeOrchestration?: boolean;
   readonly viewportExpansion?: number;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
+  /** Aggregate wall-clock deadline for this observation. */
+  readonly timeoutMs?: number;
+  /** External cancellation for this observation. */
+  readonly signal?: AbortSignal;
 }
 
 export interface MagicBrowseActOptions {
@@ -123,6 +129,10 @@ export interface MagicBrowseActOptions {
   readonly goal: string;
   readonly url?: string;
   readonly maxSteps?: number;
+  /** Aggregate wall-clock deadline for this act operation. */
+  readonly timeoutMs?: number;
+  /** External cancellation for this act operation. */
+  readonly signal?: AbortSignal;
   /**
    * Per-act opt-in for including the current page screenshot in LLM browser
    * state messages. Defaults to false.
@@ -147,6 +157,12 @@ export interface MagicBrowseActOptions {
    */
   readonly experimentalMemoryHints?: MagicBrowseExperimentalMemoryHints;
   /**
+   * Experimental acceleration hook: override the planner cadence (a planner
+   * turn runs every N navigator steps; runtime default is 3). Unset keeps
+   * stock behavior; product CLIs should guard it behind their own flag.
+   */
+  readonly experimentalPlanningInterval?: number;
+  /**
    * @deprecated Diagnostics are always written to the persisted run record for
    * the current browser session. This option is retained for source
    * compatibility and no longer needs to be set by callers.
@@ -168,6 +184,7 @@ export type MagicBrowseActStatus =
   | 'needs_approval'
   | 'failed'
   | 'max_steps'
+  | 'timed_out'
   | 'cancelled';
 
 export type MagicBrowseActBlockedReason =
@@ -191,6 +208,19 @@ export interface MagicBrowseBrowserDialogSnapshot {
   readonly message?: string;
   readonly handled: MagicBrowseBrowserDialogHandled;
 }
+
+/**
+ * Machine-readable cause for a terminal `failed` act, so callers can decide
+ * between retrying and handing the flow to the user. Absent for statuses that
+ * already carry their own semantics (blocked, needs_handoff, timed_out, ...).
+ */
+export type MagicBrowseActFailureCode =
+  | 'llm_provider_payment_required'
+  | 'llm_provider_auth'
+  | 'llm_provider_forbidden'
+  | 'llm_request_invalid'
+  | 'max_failures'
+  | 'internal_error';
 
 export type MagicBrowseActHandoff =
   | {
@@ -227,7 +257,11 @@ export interface MagicBrowseActResult {
   readonly finalMessage?: string;
   readonly handoff?: MagicBrowseActHandoff;
   readonly blockedReason?: MagicBrowseActBlockedReason;
+  readonly failureCode?: MagicBrowseActFailureCode;
   readonly dialog?: MagicBrowseBrowserDialogSnapshot;
+  readonly retryable?: true;
+  readonly mutationState?: 'unknown';
+  readonly recovery?: 'fresh_observe_required';
 }
 
 export type MagicBrowseScreenshotResult =
@@ -250,9 +284,25 @@ export type MagicBrowseScreenshotResult =
 export interface MagicBrowseObserveResult {
   readonly plannerView: string;
   readonly orchestration?: MagicBrowseObserveOrchestration;
+  /** Trusted, page-scoped runtime facts are kept separate from untrusted DOM
+   * text so downstream policy can distinguish a passive verification widget
+   * from a fresh interactive challenge. */
+  readonly trustedRuntimeEvidence?: readonly MagicBrowseTrustedRuntimeEvidence[];
 }
 
 export type MagicBrowseFillableTargetKind = 'input' | 'textarea' | 'select' | 'select-like';
+
+export type MagicBrowseFieldControlKind = 'select' | 'radio' | 'checkbox' | 'toggle';
+
+export interface MagicBrowseFieldControlOption {
+  readonly value: string;
+  readonly text: string;
+  readonly disabled?: boolean;
+  readonly bindingKey?: string;
+  readonly targetRef?: string;
+  readonly fallbackTargetRef?: string;
+  readonly checked?: boolean;
+}
 
 export interface MagicBrowseFillableTargetSourceContext {
   readonly kind: 'selectorMap';
@@ -275,7 +325,14 @@ export interface MagicBrowseFillableTargetStateContext {
   readonly popupBacked: boolean;
   readonly disabled: boolean;
   readonly required: boolean;
+  readonly withinActiveModal?: boolean;
+  readonly withinEmbeddedFrame?: boolean;
+  readonly ariaInvalid?: boolean;
+  readonly validationMessage?: string;
   readonly expanded?: string;
+  readonly checked?: boolean;
+  /** Value-free runtime state; the underlying value is never projected. */
+  readonly valuePresent?: boolean;
 }
 
 export interface MagicBrowseFillableTargetFormContext {
@@ -309,6 +366,11 @@ export interface MagicBrowseFillableTargetDescriptor {
   readonly selectorRoot?: string;
   readonly isReadonly: boolean;
   readonly popupBacked: boolean;
+  readonly controlKind?: MagicBrowseFieldControlKind;
+  readonly options?: readonly MagicBrowseFieldControlOption[];
+  readonly checked?: boolean;
+  /** Value-free runtime state; the underlying value is never projected. */
+  readonly hasValue?: boolean;
   readonly pageRef?: string;
   readonly host?: string;
   readonly context: MagicBrowseFillableTargetContext;
@@ -336,6 +398,16 @@ export interface MagicBrowseActionTargetDescriptor {
   readonly inputName?: string;
   readonly inputType?: string;
   readonly selectorRoot?: string;
+  /** Opaque stable DOM identity for safely revalidating choice actions. */
+  readonly bindingKey?: string;
+  /**
+   * Physical node identity from the source observation. A re-rendered
+   * identical twin (same tag/id/name/xpath) carries a different node id, so
+   * this is the only signal that separates "the element I observed" from
+   * "an element that merely looks like it". Consequential clicks must not
+   * cross that line.
+   */
+  readonly internalNodeId?: string;
   readonly isDisabled: boolean;
   readonly pageRef?: string;
   readonly host?: string;
@@ -394,7 +466,23 @@ export type MagicBrowseDeterministicActionBlockedReason =
   | 'input_failed'
   | 'select_failed'
   | 'press_failed'
+  | 'postcondition_mismatch'
+  | 'postcondition_unverifiable'
+  | 'action_timeout'
+  | 'action_cancelled'
+  | 'browser_disconnected'
   | 'browser_dialog_open';
+
+export type MagicBrowseDeterministicActionVerificationStrategy =
+  | 'exact'
+  | 'trimmed'
+  | 'digits_only'
+  | 'select_value';
+
+export interface MagicBrowseDeterministicActionVerification {
+  readonly verified: true;
+  readonly strategy: MagicBrowseDeterministicActionVerificationStrategy;
+}
 
 export interface MagicBrowseDeterministicActionResult {
   readonly status: MagicBrowseDeterministicActionStatus;
@@ -404,36 +492,87 @@ export interface MagicBrowseDeterministicActionResult {
   readonly url?: string;
   readonly title?: string;
   readonly reason?: MagicBrowseDeterministicActionBlockedReason;
+  readonly verification?: MagicBrowseDeterministicActionVerification;
   readonly dialog?: MagicBrowseBrowserDialogSnapshot;
+  readonly retryable?: true;
+  readonly mutationState?: 'unknown';
+  readonly recovery?: 'fresh_observe_required';
   readonly summary: string;
+  readonly progress?: MagicBrowseActionProgressEvidence;
+}
+
+/**
+ * What observably changed after a consequential action. `none` is a first-class
+ * outcome: a completed click that produced no observable progress must be
+ * distinguishable from one that did — a Pay click reporting `none` almost
+ * certainly did not submit anything.
+ */
+export type MagicBrowseActionProgressKind =
+  | 'navigation'
+  | 'content_mutation'
+  | 'validation_blocked'
+  | 'none';
+
+export interface MagicBrowseActionProgressEvidence {
+  readonly kind: MagicBrowseActionProgressKind;
+  readonly urlChanged: boolean;
+  readonly textChanged: boolean;
+  readonly dialogAppeared: boolean;
+  readonly validationSignaled: boolean;
+  readonly busySignaled: boolean;
+  /** Milliseconds after the action at which the change was first observed. */
+  readonly observedAfterMs: number;
 }
 
 export interface MagicBrowseClickOptions {
   readonly sessionId?: string;
   readonly target: MagicBrowseActionTargetDescriptor;
+  /** Must match the viewport horizon used to acquire the snapshot-scoped target. */
+  readonly viewportExpansion?: number;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  /** Capture before/after page digests; see MagicBrowseActionProgressEvidence. */
+  readonly progressEvidence?: boolean;
 }
 
 export interface MagicBrowseTypeOptions {
   readonly sessionId?: string;
   readonly target: MagicBrowseFillableTargetDescriptor;
   readonly text: string;
+  /** Must match the viewport horizon used to acquire the snapshot-scoped target. */
+  readonly viewportExpansion?: number;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface MagicBrowseFillOptions {
   readonly sessionId?: string;
   readonly target: MagicBrowseFillableTargetDescriptor;
   readonly value: string;
+  /** Must match the viewport horizon used to acquire the snapshot-scoped target. */
+  readonly viewportExpansion?: number;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface MagicBrowseSelectOptions {
   readonly sessionId?: string;
   readonly target: MagicBrowseFillableTargetDescriptor;
   readonly optionText: string;
+  /** Must match the viewport horizon used to acquire the snapshot-scoped target. */
+  readonly viewportExpansion?: number;
+  readonly redactionProfiles?: ExactValueRedactionProfiles;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface MagicBrowsePressOptions {
   readonly sessionId?: string;
   readonly keys: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface MagicBrowseObserveFillableTargets {

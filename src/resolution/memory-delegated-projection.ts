@@ -1,7 +1,4 @@
-import type {
-  MagicBrowseMatchGroupField,
-  MagicBrowseMemoryBindingValueHint,
-} from './match.js';
+import type { MagicBrowseMatchGroupField, MagicBrowseMemoryBindingValueHint } from './match.js';
 
 export type MagicBrowseMemoryDelegatedDateProjectionErrorReason =
   | 'ambiguous_date_value'
@@ -104,7 +101,9 @@ const MONTH_NAMES = [
   'December',
 ] as const;
 
-export function normalizeMemoryDelegatedDateValue(value: string): MagicBrowseMemoryDelegatedDateProjectionResult {
+export function normalizeMemoryDelegatedDateValue(
+  value: string
+): MagicBrowseMemoryDelegatedDateProjectionResult {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
     return {
@@ -227,7 +226,9 @@ export function projectMemoryDelegatedFillOperations(
 ): ProjectMemoryDelegatedFillOperationsResult {
   const targetByRef = new Map(input.targets.map((target) => [target.targetRef, target]));
   const groupedFields = groupFieldsByTarget(input.fields);
-  const operations: Array<MagicBrowseMemoryDelegatedProjectionOperation & { readonly order: number }> = [];
+  const operations: Array<
+    MagicBrowseMemoryDelegatedProjectionOperation & { readonly order: number }
+  > = [];
 
   for (const group of groupedFields) {
     const target = targetByRef.get(group.targetRef);
@@ -473,8 +474,7 @@ function formatCardExpiry(month: string, year: string): string | undefined {
   }
 
   const normalizedMonth = String(monthNumber).padStart(2, '0');
-  const shortYear =
-    trimmedYear.length > 2 ? trimmedYear.slice(-2) : trimmedYear.padStart(2, '0');
+  const shortYear = trimmedYear.length > 2 ? trimmedYear.slice(-2) : trimmedYear.padStart(2, '0');
   return `${normalizedMonth}/${shortYear}`;
 }
 
@@ -576,9 +576,7 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
-function groupFieldsByTarget(
-  fields: readonly MagicBrowseMatchGroupField[]
-): Array<{
+function groupFieldsByTarget(fields: readonly MagicBrowseMatchGroupField[]): Array<{
   readonly targetRef: string;
   readonly fields: readonly MagicBrowseMatchGroupField[];
   readonly ordinal: number;

@@ -84,10 +84,10 @@ interface DirectProviderDefinition {
 type ChatModelConstructor = new (fields: Record<string, unknown>) => BaseChatModel;
 
 function instantiateModel(
-  constructor: unknown,
+  modelConstructor: unknown,
   fields: Record<string, unknown>
 ): BaseChatModel {
-  return new (constructor as ChatModelConstructor)(fields);
+  return new (modelConstructor as ChatModelConstructor)(fields);
 }
 
 function openAiCompatibleModel(input: DirectProviderFactoryInput): BaseChatModel {
@@ -337,7 +337,7 @@ export function createDirectLlmAdapter(
     createModel(modelOptions) {
       const model =
         modelOptions.role === 'planner'
-          ? options.plannerModel ?? options.navigatorModel
+          ? (options.plannerModel ?? options.navigatorModel)
           : options.navigatorModel;
       return createRoleModel(
         {
@@ -378,23 +378,17 @@ function resolveConfig(
 ): ResolvedConfig {
   const apiKey = options.apiKey?.trim();
   if (definition.requiresApiKey && !apiKey) {
-    throw new MissingLlmConfigError(
-      `Direct LLM provider ${definition.family} requires apiKey.`
-    );
+    throw new MissingLlmConfigError(`Direct LLM provider ${definition.family} requires apiKey.`);
   }
 
   const model = options.model?.trim();
   if (!model) {
-    throw new MissingLlmConfigError(
-      `Direct LLM provider ${definition.family} requires model.`
-    );
+    throw new MissingLlmConfigError(`Direct LLM provider ${definition.family} requires model.`);
   }
 
   const baseUrl = options.baseUrl?.trim() || definition.defaultBaseUrl;
   if (definition.requiresBaseUrl && !baseUrl) {
-    throw new MissingLlmConfigError(
-      `Direct LLM provider ${definition.family} requires baseUrl.`
-    );
+    throw new MissingLlmConfigError(`Direct LLM provider ${definition.family} requires baseUrl.`);
   }
 
   return {
@@ -407,7 +401,9 @@ function resolveConfig(
   };
 }
 
-function parseProvider(value: MagicBrowseLlmProviderFamily | string | undefined): MagicBrowseLlmProviderFamily {
+function parseProvider(
+  value: MagicBrowseLlmProviderFamily | string | undefined
+): MagicBrowseLlmProviderFamily {
   if (!value) {
     throw new MissingLlmConfigError(
       `Direct LLM provider is required. Expected one of: ${DIRECT_LLM_PROVIDER_FAMILIES.join(', ')}.`

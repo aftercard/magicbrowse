@@ -15,13 +15,7 @@ const TELEPHONE_COUNTRY_CODE_FIELD_KEYS = new Set([
 ]);
 
 function autocompleteTokens(value: string | undefined): Set<string> {
-  return new Set(
-    value
-      ?.trim()
-      .toLowerCase()
-      .split(/\s+/)
-      .filter(Boolean) ?? []
-  );
+  return new Set(value?.trim().toLowerCase().split(/\s+/).filter(Boolean) ?? []);
 }
 
 function hasTelephoneAutocomplete(tokens: ReadonlySet<string>): boolean {
@@ -43,7 +37,8 @@ export function isFieldShapeCompatible(
 
   if (autocomplete.has('tel-country-code')) {
     return (
-      (candidate.fieldKey === 'phone' || TELEPHONE_COUNTRY_CODE_FIELD_KEYS.has(candidate.fieldKey)) &&
+      (candidate.fieldKey === 'phone' ||
+        TELEPHONE_COUNTRY_CODE_FIELD_KEYS.has(candidate.fieldKey)) &&
       candidate.type === 'text'
     );
   }

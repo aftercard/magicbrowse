@@ -1,6 +1,6 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import type {
   MagicBrowseActivePageIdentity,
@@ -17,6 +17,8 @@ import {
   type ExactValueRedactionProfiles,
 } from '../redaction.js';
 import { parseBrowserInstanceRef } from './attach-endpoint.js';
+import { withFileMutationLock, writeJsonFileAtomically } from './file-mutation-lock.js';
+import type { TargetObservationLease } from '../resolution/target-observation-lease.js';
 
 export const MAGICBROWSE_HOME_ENV_VAR = 'MAGICBROWSE_HOME';
 export const DEFAULT_MAGICBROWSE_HOME_DIRNAME = '.magicbrowse';
@@ -30,6 +32,11 @@ export interface ResolveMagicBrowseHomeOptions {
 
 export interface PersistedMagicBrowseSession {
   readonly version: typeof MAGICBROWSE_SESSION_SCHEMA_VERSION;
+  /**
+   * Monotonic compare-and-swap token for session authority updates. Legacy
+   * records without the field are revision zero.
+   */
+  readonly revision?: number;
   readonly id: string;
   readonly runId?: string;
   readonly ownership: MagicBrowseSessionOwnership;
@@ -49,6 +56,8 @@ export interface PersistedMagicBrowseSession {
   readonly stealth?: boolean;
   readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference;
+  /** Private action authority. Never project through MagicBrowseManagedSession. */
+  readonly observationLeases?: readonly TargetObservationLease[];
 }
 
 export interface MagicBrowseLocalCdpConnectPreference {
@@ -61,11 +70,24 @@ export interface MagicBrowseSessionStore {
   readonly currentSessionPath: string;
   loadCurrentSession(): Promise<PersistedMagicBrowseSession | undefined>;
   saveCurrentSession(session: PersistedMagicBrowseSession): Promise<void>;
+  saveCurrentSessionIfRevision(
+    session: PersistedMagicBrowseSession,
+    expectedRevision: number
+  ): Promise<boolean>;
+  invalidateCurrentSessionPageAuthorityThroughRevision(
+    sessionId: string,
+    maxRevision: number,
+    runId?: string
+  ): Promise<boolean>;
   clearCurrentSession(sessionId?: string): Promise<void>;
 }
 
 export interface FileMagicBrowseSessionStoreOptions extends ResolveMagicBrowseHomeOptions {
   readonly rootDir?: string;
+}
+
+export function persistedSessionRevision(session: PersistedMagicBrowseSession): number {
+  return session.revision ?? 0;
 }
 
 export function resolveMagicBrowseHome(options: ResolveMagicBrowseHomeOptions = {}): string {
@@ -83,36 +105,87 @@ export function createFileMagicBrowseSessionStore(
 ): MagicBrowseSessionStore {
   const rootDir = resolve(options.rootDir ?? resolveMagicBrowseHome(options));
   const currentSessionPath = join(rootDir, CURRENT_SESSION_FILENAME);
+  let mutationQueue = Promise.resolve();
+
+  const loadCurrentSession = async (): Promise<PersistedMagicBrowseSession | undefined> => {
+    let raw: string;
+    try {
+      raw = await readFile(currentSessionPath, 'utf8');
+    } catch (error) {
+      if (getErrorCode(error) === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+
+    return normalizePersistedMagicBrowseSession(JSON.parse(raw));
+  };
+
+  const enqueueMutation = <T>(operation: () => Promise<T>): Promise<T> => {
+    const task = mutationQueue.then(operation, operation);
+    mutationQueue = task.then(
+      () => undefined,
+      () => undefined
+    );
+    return task;
+  };
+
+  const writeCurrentSession = async (session: PersistedMagicBrowseSession): Promise<void> => {
+    await writeJsonFileAtomically(currentSessionPath, session);
+  };
 
   return {
     currentSessionPath,
     async loadCurrentSession() {
-      let raw: string;
-      try {
-        raw = await readFile(currentSessionPath, 'utf8');
-      } catch (error) {
-        if (getErrorCode(error) === 'ENOENT') {
-          return undefined;
-        }
-        throw error;
-      }
-
-      return normalizePersistedMagicBrowseSession(JSON.parse(raw));
+      await mutationQueue;
+      return loadCurrentSession();
     },
     async saveCurrentSession(session) {
-      await mkdir(dirname(currentSessionPath), { recursive: true });
-      await writeFile(currentSessionPath, `${JSON.stringify(session, null, 2)}\n`, 'utf8');
+      await enqueueMutation(() =>
+        withFileMutationLock(currentSessionPath, () => writeCurrentSession(session))
+      );
+    },
+    async saveCurrentSessionIfRevision(session, expectedRevision) {
+      return enqueueMutation(() =>
+        withFileMutationLock(currentSessionPath, async () => {
+          const current = await loadCurrentSession();
+          if (
+            current?.id !== session.id ||
+            persistedSessionRevision(current) !== expectedRevision
+          ) {
+            return false;
+          }
+          await writeCurrentSession(session);
+          return true;
+        })
+      );
+    },
+    async invalidateCurrentSessionPageAuthorityThroughRevision(sessionId, maxRevision, runId) {
+      return enqueueMutation(() =>
+        withFileMutationLock(currentSessionPath, async () => {
+          const current = await loadCurrentSession();
+          if (current?.id !== sessionId || persistedSessionRevision(current) > maxRevision) {
+            return false;
+          }
+          await writeCurrentSession(sessionWithoutPageAuthority(current, runId));
+          return true;
+        })
+      );
     },
     async clearCurrentSession(sessionId) {
-      if (!sessionId) {
-        await rm(currentSessionPath, { force: true });
-        return;
-      }
+      await enqueueMutation(() =>
+        withFileMutationLock(currentSessionPath, async () => {
+          if (!sessionId) {
+            await rm(currentSessionPath, { force: true });
+            return;
+          }
 
-      const current = await this.loadCurrentSession();
-      if (!current || current.id === sessionId) {
-        await rm(currentSessionPath, { force: true });
-      }
+          const current = await loadCurrentSession();
+          if (!current || current.id === sessionId) {
+            await rm(currentSessionPath, { force: true });
+          }
+        })
+      );
     },
   };
 }
@@ -134,6 +207,7 @@ export function createPersistedMagicBrowseSession(input: {
   readonly stealth?: boolean;
   readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference;
+  readonly observationLeases?: readonly TargetObservationLease[];
   readonly now?: string;
 }): PersistedMagicBrowseSession {
   const now = input.now ?? new Date().toISOString();
@@ -164,10 +238,11 @@ export function createPersistedMagicBrowseSession(input: {
     ...(input.userAgent ? { userAgent: input.userAgent } : {}),
     ...(input.proxy ? { proxy: input.proxy } : {}),
     ...(typeof input.stealth === 'boolean' ? { stealth: input.stealth } : {}),
-    ...(input.redactionProfiles
-      ? { redactionProfiles: input.redactionProfiles }
-      : {}),
+    ...(input.redactionProfiles ? { redactionProfiles: input.redactionProfiles } : {}),
     ...(localCdpConnectPreference ? { localCdpConnectPreference } : {}),
+    ...(input.observationLeases
+      ? { observationLeases: input.observationLeases.slice(0, 1024) }
+      : {}),
   };
 }
 
@@ -179,6 +254,7 @@ export function touchPersistedMagicBrowseSession(
     readonly humanVerificationResolved?: MagicBrowseHumanVerificationResolvedMarker | null;
     readonly redactionProfiles?: ExactValueRedactionProfiles;
     readonly localCdpConnectPreference?: MagicBrowseLocalCdpConnectPreference | null;
+    readonly observationLeases?: readonly TargetObservationLease[] | null;
     readonly now?: string;
   } = {}
 ): PersistedMagicBrowseSession {
@@ -188,6 +264,7 @@ export function touchPersistedMagicBrowseSession(
   );
   let next: PersistedMagicBrowseSession = {
     ...session,
+    revision: persistedSessionRevision(session) + 1,
     updatedAt: input.now ?? new Date().toISOString(),
     ...(input.runId ? { runId: input.runId } : {}),
     ...(activePageIdentity ? { activePageIdentity } : {}),
@@ -216,29 +293,56 @@ export function touchPersistedMagicBrowseSession(
   if (input.humanVerificationResolved !== undefined) {
     const marker = normalizeHumanVerificationResolvedMarker(input.humanVerificationResolved);
     if (marker) {
-      return {
+      next = {
         ...next,
         humanVerificationResolved: marker,
       };
+    } else {
+      const { humanVerificationResolved: _removed, ...withoutMarker } = next;
+      next = withoutMarker;
     }
-    const { humanVerificationResolved: _removed, ...withoutMarker } = next;
-    return withoutMarker;
+  }
+
+  if (input.observationLeases !== undefined) {
+    if (input.observationLeases) {
+      next = { ...next, observationLeases: input.observationLeases.slice(0, 1024) };
+    } else {
+      const { observationLeases: _removed, ...withoutLeases } = next;
+      next = withoutLeases;
+    }
   }
 
   return next;
 }
 
-export function normalizePersistedMagicBrowseSession(value: unknown): PersistedMagicBrowseSession | undefined {
+function sessionWithoutPageAuthority(
+  session: PersistedMagicBrowseSession,
+  runId?: string
+): PersistedMagicBrowseSession {
+  const touched = touchPersistedMagicBrowseSession(session, {
+    ...(runId ? { runId } : {}),
+    humanVerificationResolved: null,
+  });
+  const { activePageIdentity: _activePageIdentity, ...withoutPageAuthority } = touched;
+  const { observationLeases: _observationLeases, ...withoutLeases } = withoutPageAuthority;
+  return withoutLeases;
+}
+
+export function normalizePersistedMagicBrowseSession(
+  value: unknown
+): PersistedMagicBrowseSession | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
 
   const id = readString(value.id);
+  const revision = readNonNegativeInteger(value.revision);
   const runId = readString(value.runId);
   const ownership = value.ownership;
   const cdpUrl = readString(value.cdpUrl);
   const cloudProvider = normalizeCloudProvider(value.cloudProvider);
-  const browserInstanceRef = readString(value.browserInstanceRef) ?? parseBrowserInstanceRef(cdpUrl ?? '');
+  const browserInstanceRef =
+    readString(value.browserInstanceRef) ?? parseBrowserInstanceRef(cdpUrl ?? '');
   const createdAt = readString(value.createdAt);
   const updatedAt = readString(value.updatedAt);
   const pid = readPositiveNumber(value.pid);
@@ -256,9 +360,11 @@ export function normalizePersistedMagicBrowseSession(value: unknown): PersistedM
   const localCdpConnectPreference = normalizeLocalCdpConnectPreference(
     value.localCdpConnectPreference
   );
+  const observationLeases = normalizeObservationLeases(value.observationLeases);
 
   if (
     value.version !== MAGICBROWSE_SESSION_SCHEMA_VERSION ||
+    (value.revision !== undefined && revision === undefined) ||
     !id ||
     (ownership !== 'owned' && ownership !== 'attached') ||
     !cdpUrl ||
@@ -276,6 +382,7 @@ export function normalizePersistedMagicBrowseSession(value: unknown): PersistedM
 
   return {
     version: MAGICBROWSE_SESSION_SCHEMA_VERSION,
+    ...(revision !== undefined && revision > 0 ? { revision } : {}),
     id,
     ...(runId ? { runId } : {}),
     ownership,
@@ -295,7 +402,53 @@ export function normalizePersistedMagicBrowseSession(value: unknown): PersistedM
     ...(typeof value.stealth === 'boolean' ? { stealth: value.stealth } : {}),
     ...(redactionProfiles ? { redactionProfiles } : {}),
     ...(localCdpConnectPreference ? { localCdpConnectPreference } : {}),
+    ...(observationLeases ? { observationLeases } : {}),
   };
+}
+
+function normalizeObservationLeases(value: unknown): readonly TargetObservationLease[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 1024) return undefined;
+  const leases: TargetObservationLease[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !isRecord(entry.scope)) return undefined;
+    const action = entry.action;
+    const strings = [
+      entry.leaseRef,
+      entry.observationRef,
+      entry.pageRef,
+      entry.documentRef,
+      entry.descriptorSignature,
+      entry.targetRef,
+    ];
+    if (!strings.every((item) => typeof item === 'string' && item.length > 0)) return undefined;
+    if (!['click', 'fill', 'type', 'select'].includes(String(action))) return undefined;
+    const scope = entry.scope;
+    const arrays = [
+      scope.targetAncestorNodeIds,
+      scope.formOwnerNodeIds,
+      scope.modalOwnerNodeIds,
+      scope.contributingLabelNodeIds,
+      scope.optionOwnerNodeIds,
+      scope.frameOwnerNodeIds,
+    ];
+    if (
+      typeof scope.documentRef !== 'string' ||
+      typeof scope.targetNodeId !== 'string' ||
+      !arrays.every(
+        (items) =>
+          Array.isArray(items) &&
+          items.length <= 32 &&
+          items.every((item) => typeof item === 'string')
+      ) ||
+      typeof entry.observedEpoch !== 'number' ||
+      !Number.isSafeInteger(entry.observedEpoch) ||
+      entry.observedEpoch < 0
+    )
+      return undefined;
+    leases.push(entry as unknown as TargetObservationLease);
+  }
+  return leases;
 }
 
 function normalizeLocalCdpConnectPreference(
@@ -392,15 +545,17 @@ export function normalizeActivePageIdentity(
   }
 
   const targetId = readString(value.targetId);
+  const documentRef = readString(value.documentRef);
   const url = readString(value.url);
   const title = readString(value.title);
 
-  if (!targetId && !url && !title) {
+  if (!targetId && !documentRef && !url && !title) {
     return undefined;
   }
 
   return {
     ...(targetId ? { targetId } : {}),
+    ...(documentRef ? { documentRef } : {}),
     ...(url ? { url } : {}),
     ...(title ? { title } : {}),
   };
@@ -455,6 +610,13 @@ function readValidDateString(value: unknown): string | undefined {
 
 function readPositiveNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function readNonNegativeInteger(value: unknown): number | undefined {
+  if (value === undefined) {
+    return 0;
+  }
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function getErrorCode(error: unknown): string | undefined {

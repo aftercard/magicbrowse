@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Browser, Page } from 'puppeteer-core';
 
 import type { MagicBrowseActivePageIdentity } from '../types.js';
@@ -123,14 +124,58 @@ async function bringToFrontIfNeeded(
 
 export async function readPageIdentity(page: Page): Promise<MagicBrowseActivePageIdentity> {
   const targetId = await readPageTargetId(page);
+  const documentRef = await readPageDocumentRef(page);
   const title = await readPageTitle(page);
   const url = page.url();
 
   return {
     ...(targetId ? { targetId } : {}),
+    ...(documentRef ? { documentRef } : {}),
     ...(url ? { url } : {}),
     ...(title ? { title } : {}),
   };
+}
+
+async function readPageDocumentRef(page: Page): Promise<string | undefined> {
+  let session: Awaited<ReturnType<Page['createCDPSession']>> | undefined;
+  try {
+    session = await page.createCDPSession();
+    const frameTree = await session.send('Page.getFrameTree');
+    const loaderIds = collectFrameLoaderIds(frameTree.frameTree);
+    return loaderIds.length > 0
+      ? `loader-set:${createHash('sha256').update(JSON.stringify(loaderIds)).digest('hex').slice(0, 24)}`
+      : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    await session?.detach().catch(() => undefined);
+  }
+}
+
+function collectFrameLoaderIds(value: unknown): string[] {
+  const loaderIds: string[] = [];
+  const visit = (candidate: unknown): void => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return;
+    }
+    const record = candidate as Record<string, unknown>;
+    const frame = record.frame;
+    if (frame && typeof frame === 'object' && !Array.isArray(frame)) {
+      const frameRecord = frame as Record<string, unknown>;
+      const frameId = typeof frameRecord.id === 'string' ? frameRecord.id : '';
+      const loaderId = typeof frameRecord.loaderId === 'string' ? frameRecord.loaderId : '';
+      if (loaderId) {
+        loaderIds.push(`${frameId}:${loaderId}`);
+      }
+    }
+    if (Array.isArray(record.childFrames)) {
+      for (const child of record.childFrames) {
+        visit(child);
+      }
+    }
+  };
+  visit(value);
+  return loaderIds.sort();
 }
 
 export async function readPageTargetId(page: Page): Promise<string | undefined> {

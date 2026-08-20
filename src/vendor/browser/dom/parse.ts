@@ -47,6 +47,7 @@ export function _parse_node(nodeData: RawDomTreeNode): [DOMBaseNode | null, stri
     highlightIndex: elementData.highlightIndex ?? null,
     shadowRoot: elementData.shadowRoot ?? false,
     internalNodeId: elementData.internalNodeId ?? null,
+    documentRef: elementData.documentRef ?? null,
     parent: null,
     viewportInfo,
   });

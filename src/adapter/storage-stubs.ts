@@ -42,16 +42,42 @@ export const DEFAULT_GENERAL_SETTINGS: GeneralSettingsConfig = {
   replayHistoricalTasks: false,
 };
 
-// chatHistoryStore is a chrome.storage-backed log of agent steps. CLI doesn't
-// persist history across runs — replace with a no-op that swallows writes.
+// chatHistoryStore was a chrome.storage-backed log of agent steps in
+// nanobrowser. Persistence here is experimental and default-off: writes
+// happen only when MAGICBROWSE_EXPERIMENTAL_STEP_HISTORY=1 (and the executor
+// only calls store when generalSettings.replayHistoricalTasks is on), into
+// $MAGICBROWSE_HOME/step-history/<taskId>.json. This is the auto-recorder's
+// data source: the raw agent step history (model outputs + acted elements).
+import { mkdir, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export function stepHistoryPersistenceEnabled(): boolean {
+  return process.env.MAGICBROWSE_EXPERIMENTAL_STEP_HISTORY === '1';
+}
+
+export function stepHistoryDir(): string {
+  const home = process.env.MAGICBROWSE_HOME?.trim() || join(homedir(), '.magicbrowse');
+  return join(home, 'step-history');
+}
+
 export const chatHistoryStore = {
   async loadAgentStepHistory(_sessionId: string): Promise<{ history: string } | null> {
     return null;
   },
-  async storeAgentStepHistory(_taskId: string, _task: string, _history: string): Promise<void> {
-    // no-op
+  async storeAgentStepHistory(taskId: string, task: string, history: string): Promise<void> {
+    if (!stepHistoryPersistenceEnabled()) {
+      return;
+    }
+    const dir = stepHistoryDir();
+    await mkdir(dir, { recursive: true });
+    const sanitizedTaskId = taskId.replace(/[^\w.-]/g, '_');
+    await writeFile(
+      join(dir, `${sanitizedTaskId}.json`),
+      `${JSON.stringify({ taskId, task, storedAt: new Date().toISOString(), history: JSON.parse(history) })}\n`
+    );
   },
   async clearAgentStepHistory(_sessionId: string): Promise<void> {
-    // no-op
+    // History files are evidence for the recorder; nothing to clear.
   },
 };

@@ -1,5 +1,5 @@
 import type { BrowserState } from '../vendor/browser/views.js';
-import { DOMElementNode } from '../vendor/browser/dom/views.js';
+import { DOMElementNode, DOMTextNode } from '../vendor/browser/dom/views.js';
 import type {
   MagicBrowseActionTargetDescriptor,
   MagicBrowseActionTargetKind,
@@ -8,6 +8,22 @@ import type {
 } from '../types.js';
 
 export type MemoryFieldTargetKind = 'input' | 'textarea' | 'select' | 'select-like';
+
+export type MemoryFieldControlKind = 'select' | 'radio' | 'checkbox' | 'toggle';
+
+export interface MemoryFieldControlOption {
+  readonly value: string;
+  readonly text: string;
+  readonly disabled?: boolean;
+  /** Runtime-only stable DOM identity used to revalidate a choice after re-observation. */
+  readonly bindingKey?: string;
+  /** Runtime-only target binding for radio and popup-backed choices. */
+  readonly targetRef?: string;
+  /** Runtime-only semantic label/wrapper fallback for a choice action. */
+  readonly fallbackTargetRef?: string;
+  /** Runtime-only mutable state. It is never forwarded to the form compiler. */
+  readonly checked?: boolean;
+}
 
 export interface MemoryFieldTargetDescriptor {
   readonly ref: string;
@@ -27,6 +43,11 @@ export interface MemoryFieldTargetDescriptor {
   readonly selectorRoot?: string;
   readonly isReadonly?: boolean;
   readonly popupBacked?: boolean;
+  readonly controlKind?: MemoryFieldControlKind;
+  readonly options?: readonly MemoryFieldControlOption[];
+  /** Runtime-only mutable state. It is never forwarded to the form compiler. */
+  readonly checked?: boolean;
+  readonly hasValue?: boolean;
   readonly allowedActions?: readonly string[];
   readonly host?: string;
   readonly context?: unknown;
@@ -49,6 +70,12 @@ export interface MemoryFieldTargetSignals {
   readonly selectorRoot?: string;
   readonly isReadonly: boolean;
   readonly popupBacked: boolean;
+  readonly controlKind?: MemoryFieldControlKind;
+  readonly options?: readonly MemoryFieldControlOption[];
+  readonly checked?: boolean;
+  readonly hasValue?: boolean;
+  /** Privacy-safe structural mask for expiry controls (digits become `#`). */
+  readonly valueShape?: string;
 }
 
 export interface MemoryFieldTargetSourceContext {
@@ -72,7 +99,14 @@ export interface MemoryFieldTargetStateContext {
   readonly popupBacked: boolean;
   readonly disabled: boolean;
   readonly required: boolean;
+  readonly withinActiveModal?: boolean;
+  readonly withinEmbeddedFrame?: boolean;
+  readonly ariaInvalid?: boolean;
+  readonly validationMessage?: string;
   readonly expanded?: string;
+  readonly checked?: boolean;
+  readonly valuePresent?: boolean;
+  readonly valueShape?: string;
 }
 
 export interface MemoryFieldTargetFormContext {
@@ -109,8 +143,14 @@ export interface ExtractMemoryFieldTargetSignalsInput {
 
 const TARGET_REF_PREFIX = 'selector:';
 const NON_FIELD_INPUT_TYPES = new Set(['hidden', 'button', 'submit', 'reset', 'image', 'file']);
+const MAX_CONTROL_OPTIONS = 128;
+const MAX_CONTROL_OPTION_TEXT_LENGTH = 160;
+const MAX_LABEL_TEXT_LENGTH = 160;
 const SELECT_LIKE_ROLES = new Set(['combobox', 'listbox']);
 const SELECT_LIKE_HASPOPUP_VALUES = new Set(['true', 'listbox']);
+const MAX_SELECT_LIKE_OWNER_DEPTH = 3;
+const MAX_EQUIVALENT_CONTROL_DESCENDANT_DEPTH = 5;
+const SELECT_LIKE_CUSTOM_ELEMENT_PARTS = new Set(['combobox', 'dropdown', 'picker', 'select']);
 const POPUP_HASPOPUP_VALUES = new Set(['true', 'listbox', 'menu', 'tree', 'grid', 'dialog']);
 const SUBMIT_TEXT_RE =
   /\b(submit|continue|sign in|log in|pay|buy|book|reserve|checkout|next|done)\b|оплат|войти|далее/i;
@@ -124,19 +164,105 @@ export function buildMemoryFieldTargetDescriptors(
   state: BrowserStateTargetSource
 ): readonly BrowserStateMemoryFieldTargetDescriptor[] {
   const descriptors: BrowserStateMemoryFieldTargetDescriptor[] = [];
+  const handledRadioGroups = new Set<string>();
 
   for (const [selectorMapIndex, element] of state.selectorMap.entries()) {
+    const radioGroup = radioGroupForElement(state, element);
+    if (radioGroup) {
+      if (handledRadioGroups.has(radioGroup.key)) {
+        continue;
+      }
+      handledRadioGroups.add(radioGroup.key);
+    }
     const descriptor = createMemoryFieldTargetDescriptor({
       state,
       element,
       selectorMapIndex,
     });
     if (descriptor) {
-      descriptors.push(descriptor);
+      descriptors.push(
+        radioGroup
+          ? {
+              ...descriptor,
+              ...(radioGroup.label
+                ? { label: radioGroup.label, displayLabel: radioGroup.label }
+                : {}),
+              controlKind: 'radio',
+              options: radioGroup.options,
+            }
+          : descriptor
+      );
     }
   }
 
-  return descriptors;
+  return collapseNestedEquivalentSelectTargets(descriptors, state);
+}
+
+function collapseNestedEquivalentSelectTargets(
+  descriptors: readonly BrowserStateMemoryFieldTargetDescriptor[],
+  state: BrowserStateTargetSource
+): readonly BrowserStateMemoryFieldTargetDescriptor[] {
+  return descriptors.filter((candidate) => {
+    if (candidate.kind !== 'select-like' || candidate.controlKind !== 'select') {
+      return true;
+    }
+    const candidateElement = resolveSelectorMapElementForTarget(state, candidate);
+    const candidateLabel = equivalentControlLabel(candidate);
+    if (!candidateElement || !candidateLabel) {
+      return true;
+    }
+
+    return !descriptors.some((other) => {
+      if (
+        other.ref === candidate.ref ||
+        other.kind !== 'select-like' ||
+        other.controlKind !== 'select' ||
+        equivalentControlLabel(other) !== candidateLabel
+      ) {
+        return false;
+      }
+      const otherElement = resolveSelectorMapElementForTarget(state, other);
+      return Boolean(
+        otherElement &&
+          isDescendantWithin(
+            otherElement,
+            candidateElement,
+            MAX_EQUIVALENT_CONTROL_DESCENDANT_DEPTH
+          )
+      );
+    });
+  });
+}
+
+function equivalentControlLabel(descriptor: {
+  readonly displayLabel?: string;
+  readonly label?: string;
+  readonly placeholder?: string;
+  readonly inputName?: string;
+}): string | undefined {
+  return normalizeText(
+    firstDefined(
+      descriptor.displayLabel,
+      descriptor.label,
+      descriptor.placeholder,
+      descriptor.inputName
+    )
+  )?.toLowerCase();
+}
+
+function isDescendantWithin(
+  descendant: DOMElementNode,
+  ancestor: DOMElementNode,
+  maxDepth: number
+): boolean {
+  let current = descendant.parent;
+  for (let depth = 0; current && depth < maxDepth; depth += 1) {
+    if (current === ancestor) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
 }
 
 export function buildSubmitTargetDescriptors(
@@ -174,7 +300,42 @@ export function buildActionTargetDescriptors(
     }
   }
 
-  return descriptors;
+  return collapseNestedEquivalentActionTargets(descriptors, state);
+}
+
+function collapseNestedEquivalentActionTargets(
+  descriptors: readonly MagicBrowseActionTargetDescriptor[],
+  state: BrowserStateTargetSource
+): readonly MagicBrowseActionTargetDescriptor[] {
+  return descriptors.filter((candidate) => {
+    if (candidate.kind !== 'select-like') {
+      return true;
+    }
+    const candidateElement = resolveSelectorMapElementForTarget(state, candidate);
+    const candidateLabel = equivalentControlLabel(candidate);
+    if (!candidateElement || !candidateLabel) {
+      return true;
+    }
+
+    return !descriptors.some((other) => {
+      if (
+        other.ref === candidate.ref ||
+        other.kind !== 'select-like' ||
+        equivalentControlLabel(other) !== candidateLabel
+      ) {
+        return false;
+      }
+      const otherElement = resolveSelectorMapElementForTarget(state, other);
+      return Boolean(
+        otherElement &&
+          isDescendantWithin(
+            otherElement,
+            candidateElement,
+            MAX_EQUIVALENT_CONTROL_DESCENDANT_DEPTH
+          )
+      );
+    });
+  });
 }
 
 export function createMemoryFieldTargetDescriptor(input: {
@@ -209,6 +370,10 @@ export function createMemoryFieldTargetDescriptor(input: {
     selectorRoot: signals.selectorRoot,
     isReadonly: signals.isReadonly,
     popupBacked: signals.popupBacked,
+    controlKind: signals.controlKind,
+    options: signals.options,
+    checked: signals.checked,
+    hasValue: signals.hasValue,
     host,
     context,
   };
@@ -230,6 +395,7 @@ export function createActionTargetDescriptor(input: {
   const href = kind === 'link' ? readAttribute(input.element, 'href') : undefined;
   const label = firstDefined(
     readAttribute(input.element, 'aria-label'),
+    nativeLabelText(input.element),
     explicitLabelText(input.element, input.state),
     wrappingLabelText(input.element),
     text,
@@ -242,6 +408,9 @@ export function createActionTargetDescriptor(input: {
       : undefined;
   const selectorRoot = safeSelectorRoot(input.element);
   const form = nearestFormContext(input.element);
+  const bindingKey = isChoiceActionElement(input.element)
+    ? controlOptionBindingKey(input.element, nearestFormElement(input.element))
+    : undefined;
   const ref = createSelectorMapTargetRef(input.selectorMapIndex);
   const disabled =
     hasBooleanAttribute(input.element, 'disabled') ||
@@ -261,6 +430,8 @@ export function createActionTargetDescriptor(input: {
     inputName,
     inputType,
     selectorRoot,
+    bindingKey,
+    ...(input.element.internalNodeId ? { internalNodeId: input.element.internalNodeId } : {}),
     isDisabled: disabled,
     pageRef: `tab:${input.state.tabId}`,
     host: hostFromUrl(input.state.url),
@@ -286,7 +457,7 @@ export function createActionTargetDescriptor(input: {
         required:
           hasBooleanAttribute(input.element, 'required') ||
           readAttribute(input.element, 'aria-required') === 'true',
-        expanded: readAttribute(input.element, 'aria-expanded'),
+        expanded: controlExpandedState(input.element),
       }),
       ...(form ? { form } : {}),
     },
@@ -308,6 +479,7 @@ export function createSubmitTargetDescriptor(input: {
   const text = nodeText(input.element);
   const label = firstDefined(
     readAttribute(input.element, 'aria-label'),
+    nativeLabelText(input.element),
     explicitLabelText(input.element, input.state),
     wrappingLabelText(input.element),
     text,
@@ -382,11 +554,21 @@ export function extractMemoryFieldTargetSignals(
   const label = extractLabelSignal(input.element, input.state);
   const placeholder = readAttribute(input.element, 'placeholder');
   const inputName = readAttribute(input.element, 'name');
-  const inputType = kind === 'input' ? (readAttribute(input.element, 'type') ?? 'text') : undefined;
+  const controlKind = memoryFieldControlKind(input.element, kind);
+  const inputType =
+    controlKind === 'checkbox' || controlKind === 'radio' || controlKind === 'toggle'
+      ? controlKind
+      : kind === 'input'
+        ? (readAttribute(input.element, 'type') ?? 'text')
+        : undefined;
   const autocomplete = readAttribute(input.element, 'autocomplete');
   const selectorRoot = safeSelectorRoot(input.element);
   const isReadonly = isReadonlyControl(input.element);
   const popupBacked = isPopupBackedControl(input.element);
+  const options = extractControlOptions(input, controlKind);
+  const checked = readCheckedState(input.element);
+  const hasValue = memoryFieldValuePresent(input.element);
+  const valueShape = memoryFieldValueShape(input.element, autocomplete);
   const ref = createSelectorMapTargetRef(input.selectorMapIndex);
 
   return {
@@ -413,19 +595,89 @@ export function extractMemoryFieldTargetSignals(
     selectorRoot,
     isReadonly,
     popupBacked,
+    controlKind,
+    ...(options.length > 0 ? { options } : {}),
+    ...(checked !== undefined ? { checked } : {}),
+    ...(hasValue !== undefined ? { hasValue } : {}),
+    ...(valueShape ? { valueShape } : {}),
   };
+}
+
+function memoryFieldValuePresent(element: DOMElementNode): boolean | undefined {
+  const value = readAttribute(element, 'value');
+  if (value !== undefined) {
+    return value.length > 0;
+  }
+  if (normalizeTagName(element) === 'textarea') {
+    return Boolean(normalizeText(nodeText(element)));
+  }
+  return undefined;
+}
+
+function memoryFieldValueShape(
+  element: DOMElementNode,
+  autocomplete: string | undefined
+): string | undefined {
+  if (!['cc-exp', 'cc-exp-month', 'cc-exp-year'].includes(autocomplete?.toLowerCase() ?? '')) {
+    return undefined;
+  }
+  const value = readAttribute(element, 'value');
+  if (!value) {
+    return undefined;
+  }
+  return value.replace(/[0-9]/g, '#');
 }
 
 export function isMemoryFieldTargetElement(element: DOMElementNode): boolean {
   return memoryFieldTargetKind(element) !== null;
 }
 
+/**
+ * Resolve the element a target names, surviving a renumbered selector map.
+ *
+ * A selector-map index is a dense rank over whatever was captured, so any
+ * element entering or leaving the capture shifts every later index: opening a
+ * date picker on Google Flights moves the Departure input from 14 to 12, and a
+ * caller holding 14 then acts on an unrelated `<div>`. nanobrowser avoids this
+ * by identifying an element from its own structure rather than its position
+ * (`HistoryTreeProcessor`, which hashes parent tag path + attributes + xpath).
+ * This is that identity applied to the deterministic path, compared directly
+ * instead of hashed so the lookup can stay synchronous.
+ *
+ * The xpath is only trusted when the target carries one, and only to *improve*
+ * the answer: a moved element is re-found by identity, but an ambiguous or
+ * absent match falls back to the element at the index so the callers' existing
+ * checks still report why it was rejected (`stale_target`) rather than
+ * flattening every mismatch into "not found". Acting on the wrong element is
+ * still prevented — downstream descriptor validation rejects it — this only
+ * keeps the diagnosis specific.
+ */
 export function resolveSelectorMapElementForTarget(
   state: Pick<BrowserStateTargetSource, 'selectorMap'>,
-  target: Pick<MemoryFieldTargetDescriptor, 'ref' | 'selectorMapIndex'>
+  target: Pick<MemoryFieldTargetDescriptor, 'ref' | 'selectorMapIndex'> & {
+    readonly context?: { readonly selector?: { readonly xpath?: string } };
+  }
 ): DOMElementNode | undefined {
   const index = target.selectorMapIndex ?? parseSelectorMapTargetRef(target.ref);
-  return index === null ? undefined : state.selectorMap.get(index);
+  const elementAtIndex = index === null ? undefined : state.selectorMap.get(index);
+
+  const expectedXpath = target.context?.selector?.xpath;
+  if (!expectedXpath) {
+    return elementAtIndex;
+  }
+
+  if (elementAtIndex?.xpath === expectedXpath) {
+    return elementAtIndex;
+  }
+
+  const matches: DOMElementNode[] = [];
+  for (const candidate of state.selectorMap.values()) {
+    if (candidate.xpath === expectedXpath) {
+      matches.push(candidate);
+    }
+  }
+
+  return matches.length === 1 ? matches[0] : elementAtIndex;
 }
 
 export function resolveFreshSubmitTargetElement(
@@ -461,11 +713,18 @@ export function parseSelectorMapTargetRef(ref: string): number | null {
 
 function memoryFieldTargetKind(element: DOMElementNode): MemoryFieldTargetKind | null {
   const tagName = normalizeTagName(element);
+  const role = readRole(element)?.toLowerCase();
+  if (role === 'checkbox' || role === 'radio' || role === 'switch') {
+    return isReadonlyControl(element) ? null : 'input';
+  }
   if (tagName === 'textarea') {
     return isReadonlyControl(element) ? null : 'textarea';
   }
   if (tagName === 'select') {
     return 'select';
+  }
+  if (tagName === 'input' && isSelectLikeControl(element)) {
+    return 'select-like';
   }
   if (tagName === 'input') {
     const inputType = readAttribute(element, 'type')?.toLowerCase() ?? 'text';
@@ -476,6 +735,439 @@ function memoryFieldTargetKind(element: DOMElementNode): MemoryFieldTargetKind |
   }
 
   return null;
+}
+
+function memoryFieldControlKind(
+  element: DOMElementNode,
+  kind: MemoryFieldTargetKind
+): MemoryFieldControlKind | undefined {
+  const inputType = readAttribute(element, 'type')?.toLowerCase();
+  const role = readRole(element)?.toLowerCase();
+  if (inputType === 'radio' || role === 'radio') {
+    return 'radio';
+  }
+  if (role === 'switch') {
+    return 'toggle';
+  }
+  if (inputType === 'checkbox' || role === 'checkbox') {
+    return 'checkbox';
+  }
+  if (kind === 'select' || kind === 'select-like') {
+    return 'select';
+  }
+  return undefined;
+}
+
+function extractControlOptions(
+  input: ExtractMemoryFieldTargetSignalsInput,
+  controlKind: MemoryFieldControlKind | undefined
+): MemoryFieldControlOption[] {
+  if (controlKind !== 'select') {
+    return [];
+  }
+
+  const optionElements = selectOptionElements(input.element, input.state?.elementTree);
+  return uniqueControlOptions(
+    optionElements.slice(0, MAX_CONTROL_OPTIONS).flatMap((option) => {
+      const text = boundedControlOptionText(
+        firstDefined(
+          readAttribute(option, 'aria-label'),
+          nodeText(option),
+          readAttribute(option, 'label')
+        )
+      );
+      const value = boundedControlOptionText(readAttribute(option, 'value') ?? text);
+      if (!text || !value) {
+        return [];
+      }
+      const targetRef = selectorMapTargetRefForElement(input, option);
+      return [
+        {
+          value,
+          text,
+          bindingKey: controlOptionBindingKey(option, nearestFormElement(option)),
+          ...(isDisabledOption(option) ? { disabled: true } : {}),
+          ...(targetRef ? { targetRef } : {}),
+          ...(readCheckedState(option) !== undefined ? { checked: readCheckedState(option) } : {}),
+        },
+      ];
+    })
+  );
+}
+
+function selectOptionElements(element: DOMElementNode, root?: DOMElementNode): DOMElementNode[] {
+  const tagName = normalizeTagName(element);
+  if (tagName === 'select') {
+    return descendantElements(element, (candidate) => normalizeTagName(candidate) === 'option');
+  }
+
+  const controlledIds = uniqueStrings([
+    readAttribute(element, 'aria-controls'),
+    readAttribute(element, 'aria-owns'),
+  ]).flatMap((entry) => entry.split(/\s+/).filter(Boolean));
+  const controlledRoots = root
+    ? controlledIds.flatMap((id) => {
+        const controlled = findElementById(root, id);
+        return controlled ? [controlled] : [];
+      })
+    : [];
+  const selectorMapControlledOptions =
+    controlledIds.length > 0 && root
+      ? selectorMapForElement(root)
+          .map(([, candidate]) => candidate)
+          .filter(
+            (candidate) =>
+              isControlledChoiceOptionElement(candidate) &&
+              controlledIds.some((id) => hasAncestorWithId(candidate, id))
+          )
+      : [];
+  const owner = nearestSelectLikeOwner(element);
+  const roots = controlledRoots.length > 0 ? controlledRoots : owner ? [owner] : [element];
+  return uniqueElementNodes([
+    ...selectorMapControlledOptions,
+    ...roots.flatMap((candidateRoot) =>
+      descendantElements(
+        candidateRoot,
+        controlledRoots.includes(candidateRoot)
+          ? isControlledChoiceOptionElement
+          : isChoiceOptionElement
+      )
+    ),
+  ]);
+}
+
+function selectorMapForElement(root: DOMElementNode): readonly [number, DOMElementNode][] {
+  const entries: [number, DOMElementNode][] = [];
+  const visit = (element: DOMElementNode): void => {
+    if (element.highlightIndex !== null && element.highlightIndex !== undefined) {
+      entries.push([element.highlightIndex, element]);
+    }
+    for (const child of element.children) {
+      if (child instanceof DOMElementNode) {
+        visit(child);
+      }
+    }
+  };
+  visit(root);
+  return entries;
+}
+
+function hasAncestorWithId(element: DOMElementNode, id: string): boolean {
+  let current: DOMElementNode | null = element;
+  while (current) {
+    if (readAttribute(current, 'id') === id) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function uniqueElementNodes(elements: readonly DOMElementNode[]): DOMElementNode[] {
+  return [...new Set(elements)];
+}
+
+function isChoiceOptionElement(element: DOMElementNode): boolean {
+  return normalizeTagName(element) === 'option' || readRole(element)?.toLowerCase() === 'option';
+}
+
+function isControlledChoiceOptionElement(element: DOMElementNode): boolean {
+  return (
+    isChoiceOptionElement(element) ||
+    (normalizeTagName(element) === 'li' &&
+      element.highlightIndex !== null &&
+      element.highlightIndex !== undefined &&
+      Boolean(normalizeText(nodeText(element))))
+  );
+}
+
+function descendantElements(
+  root: DOMElementNode,
+  predicate: (element: DOMElementNode) => boolean
+): DOMElementNode[] {
+  const matches: DOMElementNode[] = [];
+  const visit = (element: DOMElementNode): void => {
+    for (const child of element.children) {
+      if (!(child instanceof DOMElementNode)) {
+        continue;
+      }
+      if (predicate(child)) {
+        matches.push(child);
+      }
+      if (matches.length < MAX_CONTROL_OPTIONS) {
+        visit(child);
+      }
+    }
+  };
+  visit(root);
+  return matches.slice(0, MAX_CONTROL_OPTIONS);
+}
+
+function selectorMapTargetRefForElement(
+  input: ExtractMemoryFieldTargetSignalsInput,
+  element: DOMElementNode
+): string | undefined {
+  if (element === input.element) {
+    return createSelectorMapTargetRef(input.selectorMapIndex);
+  }
+  return element.highlightIndex !== null && element.highlightIndex !== undefined
+    ? createSelectorMapTargetRef(element.highlightIndex)
+    : undefined;
+}
+
+function isDisabledOption(element: DOMElementNode): boolean {
+  if (
+    hasBooleanAttribute(element, 'disabled') ||
+    readAttribute(element, 'aria-disabled') === 'true'
+  ) {
+    return true;
+  }
+  let current = element.parent;
+  while (current) {
+    if (normalizeTagName(current) === 'optgroup') {
+      return hasBooleanAttribute(current, 'disabled');
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function readCheckedState(element: DOMElementNode): boolean | undefined {
+  const ariaSelected = readAttribute(element, 'aria-selected')?.toLowerCase();
+  if (ariaSelected === 'true' || ariaSelected === 'false') {
+    return ariaSelected === 'true';
+  }
+  const ariaChecked = readAttribute(element, 'aria-checked')?.toLowerCase();
+  if (ariaChecked === 'true' || ariaChecked === 'false') {
+    return ariaChecked === 'true';
+  }
+  const dataState = readAttribute(element, 'data-state')?.toLowerCase();
+  if (dataState === 'checked' || dataState === 'unchecked') {
+    return dataState === 'checked';
+  }
+  const inputType = readAttribute(element, 'type')?.toLowerCase();
+  const role = readRole(element)?.toLowerCase();
+  if (normalizeTagName(element) === 'option') {
+    return hasBooleanAttribute(element, 'selected');
+  }
+  if (
+    inputType === 'checkbox' ||
+    inputType === 'radio' ||
+    role === 'checkbox' ||
+    role === 'radio' ||
+    role === 'switch'
+  ) {
+    return hasBooleanAttribute(element, 'checked');
+  }
+  return undefined;
+}
+
+function radioGroupForElement(
+  state: BrowserStateTargetSource,
+  element: DOMElementNode
+):
+  | {
+      readonly key: string;
+      readonly label?: string;
+      readonly options: readonly MemoryFieldControlOption[];
+    }
+  | undefined {
+  if (memoryFieldControlKind(element, memoryFieldTargetKind(element) ?? 'input') !== 'radio') {
+    return undefined;
+  }
+  const name = readAttribute(element, 'name');
+  if (!name) {
+    return undefined;
+  }
+  const form = nearestFormElement(element);
+  const key = JSON.stringify([form?.xpath ?? 'document', name]);
+  const options = ensureUniqueControlOptionValues(
+    uniqueControlOptions(
+      [...state.selectorMap.entries()].flatMap(([selectorMapIndex, candidate]) => {
+        if (
+          readAttribute(candidate, 'name') !== name ||
+          nearestFormElement(candidate) !== form ||
+          memoryFieldControlKind(candidate, memoryFieldTargetKind(candidate) ?? 'input') !== 'radio'
+        ) {
+          return [];
+        }
+        const text = boundedControlOptionText(
+          firstDefined(
+            extractLabelSignal(candidate, state),
+            readAttribute(candidate, 'aria-label'),
+            readAttribute(candidate, 'value')
+          )
+        );
+        const value = boundedControlOptionText(readAttribute(candidate, 'value') ?? text);
+        if (!text || !value) {
+          return [];
+        }
+        const fallbackTargetRef = choiceLabelActionTargetRef(state, candidate);
+        return [
+          {
+            value,
+            text,
+            bindingKey: controlOptionBindingKey(candidate, form),
+            targetRef: createSelectorMapTargetRef(selectorMapIndex),
+            ...(fallbackTargetRef ? { fallbackTargetRef } : {}),
+            ...(isDisabledOption(candidate) ? { disabled: true } : {}),
+            ...(readCheckedState(candidate) !== undefined
+              ? { checked: readCheckedState(candidate) }
+              : {}),
+          },
+        ];
+      })
+    )
+  );
+  const label = radioGroupLabel(form, name);
+  return options.length > 0 ? { key, options, ...(label ? { label } : {}) } : undefined;
+}
+
+function choiceLabelActionTargetRef(
+  state: BrowserStateTargetSource,
+  choice: DOMElementNode
+): string | undefined {
+  const label = choiceLabelElement(state.elementTree, choice);
+  if (!label || !resolveActionTargetKind(label)) {
+    return undefined;
+  }
+  for (const [selectorMapIndex, candidate] of state.selectorMap.entries()) {
+    if (candidate === label) {
+      return createSelectorMapTargetRef(selectorMapIndex);
+    }
+  }
+  return undefined;
+}
+
+function choiceLabelElement(
+  root: DOMElementNode,
+  choice: DOMElementNode
+): DOMElementNode | undefined {
+  let current = choice.parent;
+  while (current) {
+    if (normalizeTagName(current) === 'label') {
+      return current;
+    }
+    current = current.parent;
+  }
+  const id = readAttribute(choice, 'id');
+  return id
+    ? findElement(
+        root,
+        (candidate) =>
+          normalizeTagName(candidate) === 'label' && readAttribute(candidate, 'for') === id
+      )
+    : undefined;
+}
+
+function radioGroupLabel(form: DOMElementNode | undefined, name: string): string | undefined {
+  if (form) {
+    const legend = form.children.find(
+      (child): child is DOMElementNode =>
+        child instanceof DOMElementNode && normalizeTagName(child) === 'legend'
+    );
+    const label = firstDefined(
+      readAttribute(form, 'aria-label'),
+      legend ? nodeText(legend) : undefined,
+      readAttribute(form, 'title')
+    );
+    if (label) {
+      return boundedControlOptionText(label);
+    }
+  }
+  const normalized = name.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return normalized
+    ? `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`.slice(
+        0,
+        MAX_CONTROL_OPTION_TEXT_LENGTH
+      )
+    : undefined;
+}
+
+function nearestFormElement(element: DOMElementNode): DOMElementNode | undefined {
+  let current = element.parent;
+  while (current) {
+    const tagName = normalizeTagName(current);
+    if (tagName === 'form' || tagName === 'fieldset') {
+      return current;
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function uniqueControlOptions(
+  options: readonly MemoryFieldControlOption[]
+): MemoryFieldControlOption[] {
+  const seen = new Set<string>();
+  return options.flatMap((option) => {
+    const key = JSON.stringify([option.value, option.text]);
+    if (seen.has(key)) {
+      return [];
+    }
+    seen.add(key);
+    return [option];
+  });
+}
+
+function ensureUniqueControlOptionValues(
+  options: readonly MemoryFieldControlOption[]
+): MemoryFieldControlOption[] {
+  const valueCounts = new Map<string, number>();
+  const textCounts = new Map<string, number>();
+  for (const option of options) {
+    valueCounts.set(option.value, (valueCounts.get(option.value) ?? 0) + 1);
+    textCounts.set(option.text, (textCounts.get(option.text) ?? 0) + 1);
+  }
+
+  return options.map((option, index) => {
+    if ((valueCounts.get(option.value) ?? 0) === 1) {
+      return option;
+    }
+    const uniqueValue =
+      (textCounts.get(option.text) ?? 0) === 1 ? option.text : `${option.value}#${index + 1}`;
+    return { ...option, value: uniqueValue };
+  });
+}
+
+function boundedControlOptionText(value: string | undefined): string | undefined {
+  return normalizeText(value)?.slice(0, MAX_CONTROL_OPTION_TEXT_LENGTH);
+}
+
+function controlOptionBindingKey(
+  option: DOMElementNode,
+  owner: DOMElementNode | undefined
+): string {
+  const identity = JSON.stringify({
+    ownerXpath: owner?.xpath,
+    optionXpath: option.xpath,
+    tagName: normalizeTagName(option),
+    id: readAttribute(option, 'id'),
+    name: readAttribute(option, 'name'),
+    type: readAttribute(option, 'type'),
+    role: readRole(option),
+  });
+  return `choice_${stableControlToken(identity)}`;
+}
+
+function stableControlToken(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function uniqueStrings(values: readonly (string | undefined)[]): string[] {
+  const seen = new Set<string>();
+  return values.flatMap((value) => {
+    if (!value || seen.has(value)) {
+      return [];
+    }
+    seen.add(value);
+    return [value];
+  });
 }
 
 function resolveActionTargetKind(element: DOMElementNode): MagicBrowseActionTargetKind | null {
@@ -560,6 +1252,7 @@ function buildMemoryFieldTargetContext(
   element: DOMElementNode,
   signals: MemoryFieldTargetSignals
 ): MemoryFieldTargetContext {
+  const validationMessage = visibleValidationMessage(element);
   const selector: MemoryFieldTargetSelectorContext = omitUndefined({
     id: readAttribute(element, 'id'),
     name: signals.inputName,
@@ -576,7 +1269,14 @@ function buildMemoryFieldTargetContext(
     required:
       hasBooleanAttribute(element, 'required') ||
       readAttribute(element, 'aria-required') === 'true',
-    expanded: readAttribute(element, 'aria-expanded'),
+    ...(isWithinActiveModal(element) ? { withinActiveModal: true } : {}),
+    ...(isWithinEmbeddedFrame(element) ? { withinEmbeddedFrame: true } : {}),
+    ...(readAttribute(element, 'aria-invalid') === 'true' ? { ariaInvalid: true } : {}),
+    ...(validationMessage ? { validationMessage } : {}),
+    expanded: controlExpandedState(element),
+    ...(signals.checked !== undefined ? { checked: signals.checked } : {}),
+    ...(signals.hasValue !== undefined ? { valuePresent: signals.hasValue } : {}),
+    ...(signals.valueShape ? { valueShape: signals.valueShape } : {}),
   });
   const form = nearestFormContext(element);
   const source: MemoryFieldTargetSourceContext = {
@@ -595,7 +1295,89 @@ function buildMemoryFieldTargetContext(
   };
 }
 
-function isSelectLikeControl(element: DOMElementNode): boolean {
+function isWithinActiveModal(element: DOMElementNode): boolean {
+  let current = element.parent;
+  while (current) {
+    const tagName = normalizeTagName(current);
+    if (
+      readAttribute(current, 'aria-modal') === 'true' ||
+      (tagName === 'dialog' && hasBooleanAttribute(current, 'open'))
+    ) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function isWithinEmbeddedFrame(element: DOMElementNode): boolean {
+  let current = element.parent;
+  while (current) {
+    if (normalizeTagName(current) === 'iframe') {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+const VALIDATION_ERROR_CLASS_RE = /(?:^|[\s_-])(?:error|invalid)(?:$|[\s_-])/i;
+
+function visibleValidationMessage(element: DOMElementNode): string | undefined {
+  const hasErrorSignal =
+    readAttribute(element, 'aria-invalid') === 'true' ||
+    readAttribute(element, 'data-invalid') === 'true' ||
+    VALIDATION_ERROR_CLASS_RE.test(readAttribute(element, 'class') ?? '') ||
+    VALIDATION_ERROR_CLASS_RE.test(
+      element.parent ? (readAttribute(element.parent, 'class') ?? '') : ''
+    );
+  if (!hasErrorSignal) {
+    return undefined;
+  }
+
+  let current = element.parent;
+  for (let depth = 0; current && depth < 3; depth += 1) {
+    const message = nearbyNonInteractiveText(current, element);
+    if (message) {
+      return message.slice(0, MAX_LABEL_TEXT_LENGTH);
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
+function nearbyNonInteractiveText(
+  root: DOMElementNode,
+  excluded: DOMElementNode
+): string | undefined {
+  const textParts: string[] = [];
+  const collect = (node: DOMElementNode | DOMTextNode): void => {
+    if (!node.isVisible || node === excluded) {
+      return;
+    }
+    if (node instanceof DOMTextNode) {
+      textParts.push(node.text);
+      return;
+    }
+    if (
+      node !== root &&
+      (node.isInteractive ||
+        hasBooleanAttribute(node, 'hidden') ||
+        hasBooleanAttribute(node, 'inert'))
+    ) {
+      return;
+    }
+    for (const child of node.children) {
+      if (child instanceof DOMElementNode || child instanceof DOMTextNode) {
+        collect(child);
+      }
+    }
+  };
+  collect(root);
+  return normalizeText(textParts.join(' '))?.slice(0, MAX_LABEL_TEXT_LENGTH);
+}
+
+function hasDirectSelectLikeSemantics(element: DOMElementNode): boolean {
   const role = readRole(element);
   if (role && SELECT_LIKE_ROLES.has(role)) {
     return true;
@@ -609,6 +1391,65 @@ function isSelectLikeControl(element: DOMElementNode): boolean {
   return (
     readAttribute(element, 'data-toggle') === 'dropdown' || hasClass(element, 'dropdown-toggle')
   );
+}
+
+function isSelectLikeControl(element: DOMElementNode): boolean {
+  if (hasDirectSelectLikeSemantics(element)) {
+    return true;
+  }
+  return normalizeTagName(element) === 'input' && nearestSelectLikeOwner(element) !== undefined;
+}
+
+function nearestSelectLikeOwner(element: DOMElementNode): DOMElementNode | undefined {
+  let current = element.parent;
+  for (
+    let depth = 0;
+    current && depth < MAX_SELECT_LIKE_OWNER_DEPTH;
+    depth += 1, current = current.parent
+  ) {
+    if (hasDirectSelectLikeSemantics(current) || isSelectLikeCustomElement(current)) {
+      return current;
+    }
+    const tagName = normalizeTagName(current);
+    if (tagName === 'form' || tagName === 'body') {
+      break;
+    }
+  }
+  return undefined;
+}
+
+function controlExpandedState(element: DOMElementNode): string | undefined {
+  const direct = readAttribute(element, 'aria-expanded');
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  let current = element.parent;
+  for (
+    let depth = 0;
+    current && depth < MAX_SELECT_LIKE_OWNER_DEPTH;
+    depth += 1, current = current.parent
+  ) {
+    if (hasDirectSelectLikeSemantics(current) || isSelectLikeCustomElement(current)) {
+      const inherited = readAttribute(current, 'aria-expanded');
+      if (inherited !== undefined) {
+        return inherited;
+      }
+    }
+    const tagName = normalizeTagName(current);
+    if (tagName === 'form' || tagName === 'body') {
+      break;
+    }
+  }
+  return undefined;
+}
+
+function isSelectLikeCustomElement(element: DOMElementNode): boolean {
+  const tagName = normalizeTagName(element);
+  if (!tagName.includes('-')) {
+    return false;
+  }
+  return tagName.split('-').some((part) => SELECT_LIKE_CUSTOM_ELEMENT_PARTS.has(part));
 }
 
 function isPopupBackedControl(element: DOMElementNode): boolean {
@@ -628,6 +1469,7 @@ function extractLabelSignal(
   return firstDefined(
     labelledByText(element, state),
     readAttribute(element, 'aria-label'),
+    nativeLabelText(element),
     explicitLabelText(element, state),
     wrappingLabelText(element),
     readAttribute(element, 'title')
@@ -664,19 +1506,56 @@ function explicitLabelText(
     state.elementTree,
     (node) => normalizeTagName(node) === 'label' && readAttribute(node, 'for') === id
   );
-  return label ? nodeText(label) : undefined;
+  return label ? nativeLabelText(label) : undefined;
 }
 
 function wrappingLabelText(element: DOMElementNode): string | undefined {
   let current = element.parent;
   while (current) {
     if (normalizeTagName(current) === 'label') {
-      return nodeText(current);
+      return nativeLabelText(current);
     }
     current = current.parent;
   }
 
   return undefined;
+}
+
+/**
+ * Native label text is an ownership signal, so it remains meaningful even when
+ * the browser snapshot marks a nested tooltip or input as separately
+ * interactive. The normal compact text reader intentionally stops at those
+ * descendants; native labels need the bounded visible text of the full label.
+ */
+function nativeLabelText(element: DOMElementNode): string | undefined {
+  if (normalizeTagName(element) !== 'label') {
+    return undefined;
+  }
+
+  const textParts: string[] = [];
+  const collectVisibleText = (node: DOMElementNode | DOMTextNode): void => {
+    if (!node.isVisible) {
+      return;
+    }
+    if (node instanceof DOMTextNode) {
+      textParts.push(node.text);
+      return;
+    }
+    if (
+      node !== element &&
+      (hasBooleanAttribute(node, 'hidden') || hasBooleanAttribute(node, 'inert'))
+    ) {
+      return;
+    }
+    for (const child of node.children) {
+      if (child instanceof DOMElementNode || child instanceof DOMTextNode) {
+        collectVisibleText(child);
+      }
+    }
+  };
+
+  collectVisibleText(element);
+  return normalizeText(textParts.join(' '))?.slice(0, MAX_LABEL_TEXT_LENGTH);
 }
 
 function extractTextSignal(
@@ -784,17 +1663,16 @@ export function actionDescriptorsMatch(
   expected: MagicBrowseActionTargetDescriptor,
   actual: MagicBrowseActionTargetDescriptor
 ): boolean {
-  return (
+  const stableIdentityMatches =
     expected.ref === actual.ref &&
     expected.selectorMapIndex === actual.selectorMapIndex &&
     expected.kind === actual.kind &&
     sameString(expected.tagName, actual.tagName, { normalizeCase: true }) &&
-    sameOptionalString(expected.label, actual.label) &&
-    sameOptionalString(expected.displayLabel, actual.displayLabel) &&
-    sameOptionalString(expected.text, actual.text) &&
     sameOptionalString(expected.href, actual.href) &&
     sameOptionalString(expected.inputName, actual.inputName) &&
-    sameOptionalString(expected.inputType, actual.inputType, { normalizeCase: true }) &&
+    sameOptionalString(expected.inputType, actual.inputType, {
+      normalizeCase: true,
+    }) &&
     sameOptionalString(expected.selectorRoot, actual.selectorRoot) &&
     expected.isDisabled === actual.isDisabled &&
     sameOptionalString(expected.context.selector.id, actual.context.selector.id) &&
@@ -812,7 +1690,29 @@ export function actionDescriptorsMatch(
     }) &&
     sameOptionalString(expected.context.form?.id, actual.context.form?.id) &&
     sameOptionalString(expected.context.form?.name, actual.context.form?.name) &&
-    sameOptionalString(expected.context.form?.label, actual.context.form?.label)
+    sameOptionalString(expected.context.form?.label, actual.context.form?.label);
+  if (!stableIdentityMatches) {
+    return false;
+  }
+
+  const presentationMatches =
+    sameOptionalString(expected.label, actual.label) &&
+    sameOptionalString(expected.displayLabel, actual.displayLabel) &&
+    sameOptionalString(expected.text, actual.text);
+  return (
+    presentationMatches || Boolean(expected.bindingKey && expected.bindingKey === actual.bindingKey)
+  );
+}
+
+function isChoiceActionElement(element: DOMElementNode): boolean {
+  const inputType = readAttribute(element, 'type')?.toLowerCase();
+  const role = readRole(element)?.toLowerCase();
+  return (
+    normalizeTagName(element) === 'option' ||
+    normalizeTagName(element) === 'li' ||
+    inputType === 'radio' ||
+    role === 'radio' ||
+    role === 'option'
   );
 }
 
@@ -829,7 +1729,9 @@ function submitDescriptorsMatch(
     sameOptionalString(expected.displayLabel, actual.displayLabel) &&
     sameOptionalString(expected.text, actual.text) &&
     sameOptionalString(expected.inputName, actual.inputName) &&
-    sameOptionalString(expected.inputType, actual.inputType, { normalizeCase: true }) &&
+    sameOptionalString(expected.inputType, actual.inputType, {
+      normalizeCase: true,
+    }) &&
     sameOptionalString(expected.selectorRoot, actual.selectorRoot) &&
     expected.isDisabled === actual.isDisabled &&
     sameOptionalString(expected.context.selector.id, actual.context.selector.id) &&

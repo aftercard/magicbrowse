@@ -73,16 +73,24 @@ function zIndexScore(value) {
 }
 
 function hasOverlaySignal(el, style) {
-  const role = el.getAttribute('role')?.toLowerCase();
-  const ariaModal = el.getAttribute('aria-modal')?.toLowerCase();
-  const identity = String(el.id) + ' ' + String(el.className).toLowerCase();
-  return (
-    style.position === 'fixed' ||
-    role === 'dialog' ||
-    role === 'alertdialog' ||
-    ariaModal === 'true' ||
-    /\\b(modal|dialog|overlay|drawer|popover|sheet)\\b/.test(identity)
-  );
+  let current = el;
+  while (current instanceof HTMLElement) {
+    const currentStyle = current === el ? style : window.getComputedStyle(current);
+    const role = current.getAttribute('role')?.toLowerCase();
+    const ariaModal = current.getAttribute('aria-modal')?.toLowerCase();
+    const identity = String(current.id) + ' ' + String(current.className).toLowerCase();
+    if (
+      currentStyle.position === 'fixed' ||
+      role === 'dialog' ||
+      role === 'alertdialog' ||
+      ariaModal === 'true' ||
+      /\\b(modal|dialog|overlay|drawer|popover|sheet)\\b/.test(identity)
+    ) {
+      return true;
+    }
+    current = current.parentElement;
+  }
+  return false;
 }
 
 function canScrollForInput(el) {
@@ -223,6 +231,17 @@ export interface InputTextElementNodeResult {
     readonly reason?: 'aria_invalid' | 'native_validation';
   };
   readonly inputTarget: InputTargetActivationDiagnostics;
+}
+
+/** Value-free observable-state digest; see capturePageProgressDigest. */
+export interface PageProgressDigest {
+  readonly url: string;
+  readonly title: string;
+  readonly textHash: string;
+  readonly textLength: number;
+  readonly dialogLikeCount: number;
+  readonly invalidFieldCount: number;
+  readonly busyCount: number;
 }
 
 export type InputTargetActivationSource =
@@ -633,6 +652,7 @@ export default class Page {
       ...this._state,
       elementTree: content.elementTree,
       selectorMap: content.selectorMap,
+      formMutationFrames: content.formMutationFrames,
       url: puppeteerPage.url(),
       title: await this.title(),
       screenshot,
@@ -1157,6 +1177,163 @@ export default class Page {
     }
   }
 
+  async readElementNodeValue(elementNode: DOMElementNode): Promise<string> {
+    if (!this._puppeteerPage) {
+      throw new Error('Puppeteer is not connected');
+    }
+
+    const element = await this.locateElement(elementNode);
+    if (!element) {
+      const stableIdentityValue = await this._readUniqueStableFormControlValue(elementNode);
+      if (stableIdentityValue !== undefined) {
+        return stableIdentityValue;
+      }
+      throw new Error('Element value could not be read');
+    }
+
+    return element.evaluate((node) => {
+      if (
+        node instanceof HTMLInputElement ||
+        node instanceof HTMLTextAreaElement ||
+        node instanceof HTMLSelectElement
+      ) {
+        return node.value;
+      }
+      throw new Error('Element does not expose a form value');
+    });
+  }
+
+  /**
+   * A cheap, value-free digest of observable page state, taken before and
+   * after a consequential action to prove whether the action had any effect.
+   * Deliberately not a DOM-tree build: a final-commitment click needs a
+   * same-tick answer, and the signals that distinguish "navigated",
+   * "something rendered", "validation blocked", and "nothing happened" are
+   * all readable in one evaluate.
+   */
+  async capturePageProgressDigest(): Promise<PageProgressDigest> {
+    if (!this._puppeteerPage) {
+      throw new Error('Puppeteer is not connected');
+    }
+    const inPage = await this._puppeteerPage.evaluate(() => {
+      const text = document.body?.innerText ?? '';
+      // FNV-1a over the visible text: stable, tiny, and value-free — the hash
+      // leaves the page, the text does not.
+      let hash = 0x811c9dc5;
+      for (let i = 0; i < text.length; i++) {
+        hash ^= text.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193);
+      }
+      const dialogLike = document.querySelectorAll(
+        '[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog[open]'
+      ).length;
+      // `:invalid` alone is static — a required-empty field matches it from
+      // page load. `:user-invalid` and aria-invalid only appear once the page
+      // actively signals the problem, which is the delta a click can cause.
+      let userInvalid = 0;
+      try {
+        userInvalid = document.querySelectorAll(':user-invalid').length;
+      } catch {
+        // Engine without :user-invalid — aria-invalid still counts below.
+      }
+      const invalidFields = userInvalid + document.querySelectorAll('[aria-invalid="true"]').length;
+      const busy = document.querySelectorAll('[aria-busy="true"]').length;
+      return {
+        textHash: (hash >>> 0).toString(16),
+        textLength: text.length,
+        dialogLikeCount: dialogLike,
+        invalidFieldCount: invalidFields,
+        busyCount: busy,
+      };
+    });
+    return {
+      url: this._puppeteerPage.url(),
+      title: await this._puppeteerPage.title().catch(() => ''),
+      ...inPage,
+    };
+  }
+
+  /**
+   * Cross-origin payment frames can replace an iframe-owned control after its
+   * input/change event. In that case the fresh DOM snapshot still identifies
+   * the control, but walking its old iframe ancestry can no longer reacquire
+   * the live node. Rebind only by stable DOM identity across every current
+   * frame, require exactly one match, and return the value solely to the
+   * deterministic postcondition comparator.
+   */
+  private async _readUniqueStableFormControlValue(
+    elementNode: DOMElementNode,
+  ): Promise<string | undefined> {
+    const match = await this._locateUniqueStableFormControl(elementNode);
+    if (!match) {
+      return undefined;
+    }
+    try {
+      return await match.evaluate(node => {
+        if (
+          node instanceof HTMLInputElement ||
+          node instanceof HTMLTextAreaElement ||
+          node instanceof HTMLSelectElement
+        ) {
+          return node.value;
+        }
+        throw new Error('Element does not expose a form value');
+      });
+    } finally {
+      await match.dispose().catch(() => undefined);
+    }
+  }
+
+  /** Reacquire one replaced native control by unique stable id/name only. */
+  private async _locateUniqueStableFormControl(
+    elementNode: DOMElementNode,
+  ): Promise<ElementHandle<Element> | undefined> {
+    if (!this._puppeteerPage) {
+      return undefined;
+    }
+
+    const tagName = elementNode.tagName?.toLowerCase();
+    if (tagName !== 'input' && tagName !== 'textarea' && tagName !== 'select') {
+      return undefined;
+    }
+
+    const expectedId = elementNode.attributes.id;
+    const expectedName = elementNode.attributes.name;
+    if (!expectedId && !expectedName) {
+      return undefined;
+    }
+
+    const matches: ElementHandle<Element>[] = [];
+    try {
+      for (const frame of this._puppeteerPage.frames()) {
+        const candidates = (await frame.$$(tagName)) as ElementHandle<Element>[];
+        for (const candidate of candidates) {
+          const matchesIdentity = await candidate.evaluate(
+            (node, identity) =>
+              node.tagName.toLowerCase() === identity.tagName &&
+              (!identity.id || node.getAttribute('id') === identity.id) &&
+              (!identity.name || node.getAttribute('name') === identity.name),
+            { tagName, id: expectedId, name: expectedName },
+          );
+          if (matchesIdentity) {
+            matches.push(candidate);
+          } else {
+            await candidate.dispose().catch(() => undefined);
+          }
+        }
+      }
+
+      if (matches.length !== 1) {
+        return undefined;
+      }
+      return matches[0];
+    } finally {
+      if (matches.length !== 1) {
+        await Promise.all(matches.map(match => match.dispose().catch(() => undefined)));
+      }
+    }
+  }
+
   async selectDropdownOption(index: number, text: string): Promise<string> {
     const selectorMap = this.getSelectorMap();
     const element = selectorMap?.get(index);
@@ -1244,7 +1421,6 @@ export default class Page {
     }
 
     logger.debug('Attempting to select dropdown by exact option value');
-    logger.debug(`Element attributes: ${JSON.stringify(element.attributes)}`);
     logger.debug(`Element tag: ${element.tagName}`);
 
     if (element.tagName?.toLowerCase() !== 'select') {
@@ -1273,11 +1449,10 @@ export default class Page {
           const option = options.find((opt) => opt.value === optionValue);
 
           if (!option) {
-            const availableOptions = options.map((o) => JSON.stringify(o.value)).join(', ');
             return {
               status: 'blocked' as const,
               reason: 'value_not_found' as const,
-              message: `Exact option value not found in dropdown element with index ${elementIndex}. Available values: ${availableOptions}`,
+              message: `Exact option value not found in dropdown element with index ${elementIndex}`,
             };
           }
 
@@ -1299,7 +1474,7 @@ export default class Page {
 
           return {
             status: 'selected' as const,
-            message: `Selected option by exact value with text "${option.text}"`,
+            message: 'Selected dropdown option by exact value',
           };
         },
         value,
@@ -1322,6 +1497,64 @@ export default class Page {
       }
       throw new Error(errorMessage);
     }
+  }
+
+  async selectDropdownOptionByExactTextOrValue(
+    element: DOMElementNode,
+    candidate: string,
+    options: { allowCountryAlias?: boolean } = {},
+  ): Promise<string> {
+    if (!this._puppeteerPage) {
+      throw new Error('Element not found or puppeteer is not connected');
+    }
+    if (element.tagName?.toLowerCase() !== 'select') {
+      throw new Error('Resolved dropdown element is not a SELECT');
+    }
+
+    const elementHandle =
+      (await this.locateElement(element)) ??
+      (await this._locateUniqueStableFormControl(element));
+    if (!elementHandle) {
+      throw new Error('Resolved dropdown element not found');
+    }
+
+    const result = await elementHandle.evaluate(
+      (select, exactCandidate, allowCountryAlias) => {
+        if (!(select instanceof HTMLSelectElement)) {
+          return { status: 'blocked' as const, reason: 'not_select' as const };
+        }
+        let matches = Array.from(select.options).filter(
+          option => option.text === exactCandidate || option.value === exactCandidate,
+        );
+        if (matches.length === 0 && allowCountryAlias) {
+          const normalizedCandidate = exactCandidate.normalize('NFKC').trim().toLowerCase();
+          matches = Array.from(select.options).filter(option => {
+            const countryName = option.text.replace(/\s*\(\+\d{1,4}\)\s*$/u, '');
+            return countryName.normalize('NFKC').trim().toLowerCase() === normalizedCandidate;
+          });
+        }
+        if (matches.length !== 1) {
+          return { status: 'blocked' as const, reason: 'text_not_unique' as const };
+        }
+        const option = matches[0];
+        const previousValue = select.value;
+        select.value = option.value;
+        if (select.value !== option.value) {
+          return { status: 'blocked' as const, reason: 'value_not_retained' as const };
+        }
+        if (previousValue !== option.value) {
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        return { status: 'selected' as const, value: option.value };
+      },
+      candidate,
+      options.allowCountryAlias === true,
+    );
+    if (result.status !== 'selected') {
+      throw new Error(`Exact dropdown selection failed: ${result.reason}`);
+    }
+    return result.value;
   }
 
   async locateElement(element: DOMElementNode): Promise<ElementHandle | null> {
@@ -1814,13 +2047,6 @@ export default class Page {
     try {
       return await requested.evaluate(
         (requestedElement, activeElement, marker, markerApplied) => {
-          const isEditable = (element: Element): boolean => {
-            if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-              return !element.disabled && !element.readOnly;
-            }
-            return element instanceof HTMLElement && element.isContentEditable;
-          };
-
           if (requestedElement === activeElement || requestedElement.contains(activeElement)) {
             return { useActive: true, source: 'requested_target' as const };
           }
@@ -1828,7 +2054,12 @@ export default class Page {
           const activeExistedBeforeActivation = markerApplied
             ? Boolean((activeElement as HTMLElement & Record<string, boolean | undefined>)[marker])
             : true;
-          if (!isEditable(requestedElement) || !activeExistedBeforeActivation) {
+          // Adopt the active element only when our own activation created or moved
+          // focus. A pre-existing focus is the site's own (search/coupon box) and
+          // must never absorb the write, even when the requested element is a
+          // non-editable masked-widget wrapper — that case fails closed downstream
+          // in _assertCanInputText rather than typing somewhere else.
+          if (!activeExistedBeforeActivation) {
             return { useActive: true, source: 'proxy_active_target' as const };
           }
 

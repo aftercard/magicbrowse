@@ -24,6 +24,7 @@ export interface BrowserStateDescriptionInput {
 export interface BrowserPageSnapshotInput {
   readonly state: BrowserState;
   readonly includeAttributes: readonly string[] | null;
+  readonly textProjector?: BrowserStateTextProjector;
 }
 
 export interface BrowserStateText {
@@ -34,7 +35,8 @@ export interface BrowserStateText {
 export function buildBrowserPageSnapshot(input: BrowserPageSnapshotInput): BrowserStateText {
   const browserState = input.state;
   const rawElementsText = browserState.elementTree.clickableElementsToString(
-    input.includeAttributes ? [...input.includeAttributes] : null
+    input.includeAttributes ? [...input.includeAttributes] : null,
+    input.textProjector
   );
 
   let formattedElementsText = '';
@@ -47,10 +49,14 @@ export function buildBrowserPageSnapshot(input: BrowserPageSnapshotInput): Brows
     formattedElementsText = 'empty page';
   }
 
-  const currentTab = `{id: ${browserState.tabId}, url: ${browserState.url}, title: ${browserState.title}}`;
+  const projectText = input.textProjector ?? ((value: string) => value);
+  const currentTab = `{id: ${browserState.tabId}, url: ${projectText(browserState.url)}, title: ${projectText(browserState.title)}}`;
   const otherTabs = browserState.tabs
     .filter(tab => tab.id !== browserState.tabId)
-    .map(tab => `- {id: ${tab.id}, url: ${tab.url}, title: ${tab.title}}`);
+    .map(
+      tab =>
+        `- {id: ${tab.id}, url: ${projectText(tab.url)}, title: ${projectText(tab.title)}}`
+    );
   const text = `Current tab: ${currentTab}
 Other available tabs:
   ${otherTabs.join('\n')}
@@ -64,6 +70,7 @@ export function buildBrowserStateDescription(input: BrowserStateDescriptionInput
   const pageSnapshot = buildBrowserPageSnapshot({
     state: input.state,
     includeAttributes: input.includeAttributes,
+    ...(input.textProjector ? { textProjector: input.textProjector } : {}),
   });
 
   let stepInfoDescription = '';
@@ -183,7 +190,7 @@ export function formatTrustedRuntimeEvidence(
   }
 
   lines.push(
-    'For this page only, continue ordinary browser work without trying to solve or bypass the CAPTCHA. If CAPTCHA or human verification is still visible, report needs_handoff.'
+    'For this page only, continue ordinary browser work without trying to solve or bypass the CAPTCHA. A passive checkbox or iframe may remain visible after external token injection and is not enough by itself to report needs_handoff. Report needs_handoff if a fresh interactive challenge, an explicit verification error, or other current page evidence shows that human verification is still required.'
   );
 
   return lines.join('\n');

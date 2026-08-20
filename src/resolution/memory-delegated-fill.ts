@@ -1,8 +1,5 @@
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
-import {
-  buildExactValueRedactionProfile,
-  type ExactValueRedactionProfile,
-} from '../redaction.js';
+import { buildExactValueRedactionProfile, type ExactValueRedactionProfile } from '../redaction.js';
 import type {
   MagicBrowseMatchGroupResult,
   MagicBrowseMatchGroupCandidate,
@@ -55,7 +52,9 @@ export type MagicBrowseMemoryDelegatedArtifactReadResult =
     };
 
 export interface MagicBrowseMemoryDelegatedArtifactReader {
-  read(input: MagicBrowseMemoryDelegatedArtifactReadInput): Promise<MagicBrowseMemoryDelegatedArtifactReadResult>;
+  read(
+    input: MagicBrowseMemoryDelegatedArtifactReadInput
+  ): Promise<MagicBrowseMemoryDelegatedArtifactReadResult>;
 }
 
 export interface MagicBrowseMemoryDelegatedAssistiveBinding {
@@ -94,7 +93,8 @@ export interface MagicBrowseMemoryDelegatedAssistiveResolver {
   ): Promise<MagicBrowseMemoryDelegatedAssistiveResolutionResult>;
 }
 
-export interface MagicBrowseMemoryDelegatedFillTargetDescriptor extends MagicBrowseMemoryDelegatedProjectionTarget {
+export interface MagicBrowseMemoryDelegatedFillTargetDescriptor
+  extends MagicBrowseMemoryDelegatedProjectionTarget {
   readonly kind?: string;
   readonly selectorMapIndex?: number;
 }
@@ -218,7 +218,11 @@ export async function executeMemoryDelegatedFill(
     return block(input, artifact.reason);
   }
 
-  const profile = buildExactValueRedactionProfile(artifact.values);
+  const profile = buildExactValueRedactionProfile(
+    Object.fromEntries(
+      Object.entries(artifact.values).filter(([fieldKey]) => modelHiddenMemoryFieldKey(fieldKey))
+    )
+  );
   if (Object.keys(profile.rules).length > 0) {
     const profileRef = input.redactionProfileRef ?? input.artifactRef;
     await input.runRecorder?.update({
@@ -426,9 +430,7 @@ async function prepareMemoryDelegatedFillOperations(
   };
 }
 
-function validateMemoryDelegatedFillTargets(
-  input: MemoryDelegatedFillExecutionInput
-):
+function validateMemoryDelegatedFillTargets(input: MemoryDelegatedFillExecutionInput):
   | {
       readonly status: 'ready';
     }
@@ -609,13 +611,37 @@ async function resolveAssistiveValues(
 }
 
 function shouldAssistMemoryDelegatedField(field: MagicBrowseMatchGroupField): boolean {
-  if (field.fieldKey === 'full_name' || field.fieldKey === 'date_of_birth') {
-    return false;
-  }
-  if (field.fieldKey === 'exp_month' || field.fieldKey === 'exp_year') {
-    return false;
-  }
-  return true;
+  return !modelHiddenMemoryFieldKey(field.fieldKey);
+}
+
+function modelHiddenMemoryFieldKey(fieldKey: string): boolean {
+  const normalized = fieldKey
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_');
+  return [
+    'pan',
+    'card_number',
+    'payment_card_number',
+    'cvv',
+    'cvc',
+    'csc',
+    'password',
+    'passcode',
+    'otp',
+    'authentication_code',
+    'auth_code',
+    'api_key',
+    'private_key',
+    'secret',
+    'token',
+  ].some(
+    (protectedName) =>
+      normalized === protectedName ||
+      normalized.startsWith(`${protectedName}_`) ||
+      normalized.endsWith(`_${protectedName}`)
+  );
 }
 
 function uniqueFieldKeys(fields: readonly MagicBrowseMatchGroupField[]): readonly string[] {

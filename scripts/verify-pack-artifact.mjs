@@ -67,9 +67,7 @@ const packResult = extractPackJson(rawOutput)?.[0];
 assert(packResult, 'npm pack did not return pack metadata.');
 
 const files = packResult.files.map((entry) => entry.path);
-const packedManifest = JSON.parse(
-  fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8')
-);
+const packedManifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
 const unexpectedFiles = files.filter(
   (filePath) =>
     filePath.startsWith('src/') ||

@@ -21,9 +21,15 @@ export function enableDebug(filePath: string): void {
   _logPath = path.resolve(filePath);
   // Truncate at the start of each act() call so each run gets a clean log.
   try {
-    fs.writeFileSync(_logPath, `# magicbrowse debug log started ${new Date().toISOString()}\n`, 'utf8');
+    fs.writeFileSync(
+      _logPath,
+      `# magicbrowse debug log started ${new Date().toISOString()}\n`,
+      'utf8'
+    );
   } catch (err) {
-    process.stderr.write(`[debug] failed to open ${_logPath}: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(
+      `[debug] failed to open ${_logPath}: ${err instanceof Error ? err.message : String(err)}\n`
+    );
     _enabled = false;
     _logPath = null;
   }
@@ -58,7 +64,11 @@ export function debugWrite(line: string): void {
   }
   if (!_logPath) return;
   try {
-    fs.appendFileSync(_logPath, persistedLine.endsWith('\n') ? persistedLine : persistedLine + '\n', 'utf8');
+    fs.appendFileSync(
+      _logPath,
+      persistedLine.endsWith('\n') ? persistedLine : persistedLine + '\n',
+      'utf8'
+    );
   } catch {
     // best-effort; don't crash the agent over a log write failure
   }
@@ -81,7 +91,7 @@ function safeStringify(value: unknown): string {
         }
         return current;
       },
-      2,
+      2
     );
   } catch (err) {
     return `[unserializable: ${err instanceof Error ? err.message : String(err)}]`;

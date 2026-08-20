@@ -32,10 +32,30 @@ export function removeThinkTags(text: string): string {
   const thinkTagsRegex = /<think>[\s\S]*?<\/think>/g;
   let result = text.replace(thinkTagsRegex, '');
 
-  // Step 2: If there's an unmatched closing tag </think>,
-  // remove everything up to and including that.
-  const strayCloseTagRegex = /[\s\S]*?<\/think>/g;
-  result = result.replace(strayCloseTagRegex, '');
+  // Step 2: Treat a leading unmatched </think> as the end of an opening-tag-less
+  // reasoning block and drop what precedes it.
+  //
+  // Only when step 1 changed nothing, and only anchored at the start. Run
+  // unanchored and globally it matched from position 0 of step 1's *output* and
+  // deleted the answer: `<think>r</think>Here is answer</think>done` returned
+  // "done", silently discarding "Here is answer". Reasoning models emit a stray
+  // closing tag often enough — talking about the tag, or truncating mid-stream —
+  // that this quietly ate real responses, and an answer reduced to a fragment
+  // then fails JSON extraction as invalid_model_output rather than as itself.
+  if (result === text) {
+    const leadingOrphanedBlockRegex = /^[\s\S]*?<\/think>/;
+    const withoutLeadingBlock = result.replace(leadingOrphanedBlockRegex, '');
+    // Stripping everything means the "reasoning" was the whole message, so it
+    // was the answer: `{"a":1}</think>` is a result with a stray tag, not a
+    // thought. Returning nothing is never the better reading.
+    if (withoutLeadingBlock.trim() !== '') {
+      result = withoutLeadingBlock;
+    }
+  }
+
+  // Any </think> still standing is a stray tag inside real content, not a
+  // boundary: drop the tag and keep the text on both sides of it.
+  result = result.replace(/<\/think>/g, ' ');
 
   return result.trim();
 }

@@ -30,6 +30,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { wrapUntrustedContent } from '../messages/utils.js';
 import type { DOMElementNode } from '../../browser/dom/views.js';
 import type { InputTargetActivationDiagnostics } from '../../browser/page.js';
+import { waitForAbortableDelay } from '../../../runtime/browser-action-deadline.js';
 
 const logger = createLogger('Action');
 const ACTION_VALUE_PREVIEW_LENGTH = 160;
@@ -51,6 +52,8 @@ export class Action {
     public readonly schema: ActionSchema,
     // Whether this action has an index argument
     public readonly hasIndex: boolean = false,
+    /** Intentional control-only actions are excluded from browser deadlines. */
+    public readonly deadlinePolicy: 'browser' | 'none' = 'browser',
   ) {}
 
   async call(input: unknown): Promise<ActionResult> {
@@ -163,7 +166,7 @@ export class ActionBuilder {
         isDone: true,
         extractedContent: input.text,
       });
-    }, doneActionSchema);
+    }, doneActionSchema, false, 'none');
     actions.push(done);
 
     const searchGoogle = new Action(async (input: z.infer<typeof searchGoogleActionSchema.schema>) => {
@@ -216,11 +219,11 @@ export class ActionBuilder {
       const seconds = input.seconds || 3;
       const intent = input.intent || t('act_wait_start', [seconds.toString()]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
-      await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+      await waitForAbortableDelay(seconds * 1000, this.context.controller.signal);
       const msg = t('act_wait_ok', [seconds.toString()]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
       return new ActionResult({ extractedContent: msg, includeInMemory: true });
-    }, waitActionSchema);
+    }, waitActionSchema, false, 'none');
     actions.push(wait);
 
     // Element Interaction Actions
@@ -383,7 +386,7 @@ export class ActionBuilder {
 
       const msg = wrapUntrustedContent(rawMsg);
       return new ActionResult({ extractedContent: msg, includeInMemory: true });
-    }, cacheContentActionSchema);
+    }, cacheContentActionSchema, false, 'none');
     actions.push(cacheContent);
 
     // Scroll to percent
@@ -392,7 +395,7 @@ export class ActionBuilder {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
 
-      if (input.index) {
+      if (input.index !== undefined && input.index !== null) {
         const state = await page.getCachedState();
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
@@ -416,7 +419,7 @@ export class ActionBuilder {
       const intent = input.intent || t('act_scrollToTop_start');
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
-      if (input.index) {
+      if (input.index !== undefined && input.index !== null) {
         const state = await page.getCachedState();
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
@@ -439,7 +442,7 @@ export class ActionBuilder {
       const intent = input.intent || t('act_scrollToBottom_start');
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
-      if (input.index) {
+      if (input.index !== undefined && input.index !== null) {
         const state = await page.getCachedState();
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
@@ -463,7 +466,7 @@ export class ActionBuilder {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
 
-      if (input.index) {
+      if (input.index !== undefined && input.index !== null) {
         const state = await page.getCachedState();
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
@@ -511,7 +514,7 @@ export class ActionBuilder {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
 
-      if (input.index) {
+      if (input.index !== undefined && input.index !== null) {
         const state = await page.getCachedState();
         const elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {

@@ -1,6 +1,6 @@
 {
   "name": "@aftercard/magicbrowse",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "type": "module",
   "description": "LLM-first browser-automation runtime: planner + navigator agents driving Chrome over CDP",
   "license": "MIT AND Apache-2.0",
@@ -47,7 +47,11 @@
     "check-types": "tsc --noEmit",
     "lint": "biome check --files-ignore-unknown=true README.md LICENSE biome.json scripts src vendor-notes",
     "pack:verify": "node scripts/verify-pack-artifact.mjs",
-    "smoke:pack-install": "node scripts/verify-pack-install-smoke.mjs"
+    "smoke:pack-install": "node scripts/verify-pack-install-smoke.mjs",
+    "test:unit:status": "vitest run --passWithNoTests src/transport/session-status.test.ts",
+    "test:unit:leases": "vitest run --passWithNoTests src/resolution/target-observation-lease.test.ts",
+    "test:mutation-aware-forms": "vitest run --passWithNoTests --no-file-parallelism --maxWorkers=1 src/__tests__/mutation-aware-form-reliability.integration.test.ts",
+    "test:mutation-aware-performance": "vitest run --passWithNoTests --no-file-parallelism --maxWorkers=1 src/__tests__/mutation-aware-form-performance.integration.test.ts"
   },
   "dependencies": {
     "@langchain/anthropic": "0.3.27",

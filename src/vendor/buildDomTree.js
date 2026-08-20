@@ -588,24 +588,12 @@ window.buildDomTree = (
       return true;
     }
 
-    try {
-      const getEventListenersForNode =
-        element?.ownerDocument?.defaultView?.getEventListenersForNode || window.getEventListenersForNode;
-      if (typeof getEventListenersForNode === 'function') {
-        const listeners = getEventListenersForNode(element);
-        const clickEvents = ['click', 'mousedown', 'mouseup', 'keydown', 'keyup'];
-        for (const eventType of clickEvents) {
-          for (const listener of listeners) {
-            if (listener.type === eventType) {
-              return true;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      // If checking listeners fails, rely on other direct facts.
-    }
-
+    // No listener probe here: getEventListenersForNode exists only in the
+    // DevTools console, never in the page context this script is injected
+    // into, so a check for it can only ever be false. Delegated handlers
+    // (React and friends) are therefore invisible to this function by
+    // construction; role, aria-haspopup, and inline onclick above are the
+    // facts actually observable from the page.
     return false;
   }
 
@@ -631,10 +619,14 @@ window.buildDomTree = (
       return false;
     }
 
+    // A readonly text control stays interactive. Readonly means "you cannot
+    // type here", not "this element does not exist": date fields and pickers
+    // are routinely readonly inputs that open a panel on click. Dropping them
+    // here also renumbers every later index, so a caller that remembered an
+    // index across the mutation silently acts on a different element.
+    // deterministic-actions enforces the real boundary at action time, where
+    // it can say `target_readonly` instead of vanishing.
     const isReadonlyText = isReadonlyTextControl(element);
-    if (isReadonlyText && !hasDirectReadonlyClickActivation(element)) {
-      return false;
-    }
 
     // Define interactive cursors
     const interactiveCursors = new Set([
@@ -919,6 +911,31 @@ window.buildDomTree = (
     // If we're in an iframe, elements are considered top by default
     if (doc !== window.document) {
       return true;
+    }
+
+    // elementFromPoint only accepts coordinates inside the physical viewport.
+    // An expanded observation horizon can still include controls that are
+    // temporarily clipped above or below an active modal's scroll viewport.
+    // Treat those controls as belonging to the active interaction layer, but
+    // do not relax the top-element check for ordinary offscreen page content.
+    const isOutsidePhysicalViewport = Array.from(rects).every(
+      (rect) =>
+        rect.bottom <= 0 ||
+        rect.top >= window.innerHeight ||
+        rect.right <= 0 ||
+        rect.left >= window.innerWidth
+    );
+    if (isOutsidePhysicalViewport) {
+      let ancestor = element;
+      while (ancestor && ancestor !== document.documentElement) {
+        const isOpenDialog =
+          ancestor instanceof HTMLDialogElement && ancestor.hasAttribute('open');
+        const isAriaModal = ancestor.getAttribute?.('aria-modal') === 'true';
+        if (isOpenDialog || isAriaModal) {
+          return true;
+        }
+        ancestor = ancestor.parentElement;
+      }
     }
 
     // For shadow DOM, we need to check within its own root context
@@ -1385,7 +1402,7 @@ window.buildDomTree = (
     }
   }
 
-  function buildDomTree(node, parentIframe = null, isParentHighlighted = false, depth = 0, isInsideShadowTree = false) {
+  function buildDomTree(node, parentIframe = null, isParentHighlighted = false, depth = 0) {
     // Initialize visited nodes tracking on first call
     if (!visitedNodes) {
       visitedNodes = new WeakSet();
@@ -1421,6 +1438,14 @@ window.buildDomTree = (
         xpath: '/body',
         children: [],
       };
+      const internalNodeId = getMagicBrowseDomNodeId(node);
+      if (internalNodeId) {
+        nodeData.internalNodeId = internalNodeId;
+      }
+      const mutationJournal = node.ownerDocument?.defaultView?.__magicBrowseFormMutationJournal;
+      if (mutationJournal && typeof mutationJournal.documentRef === 'string') {
+        nodeData.documentRef = mutationJournal.documentRef;
+      }
 
       // Process children of body
       for (const child of Array.from(node.childNodes)) {
@@ -1516,11 +1541,18 @@ window.buildDomTree = (
       children: [],
     };
 
-    if (node.shadowRoot || isInsideShadowTree) {
-      const internalNodeId = getMagicBrowseDomNodeId(node);
-      if (internalNodeId) {
-        nodeData.internalNodeId = internalNodeId;
-      }
+    // Every element node carries the id, not just shadow ones. page.ts compares
+    // internalNodeId when it re-locates an observed target; without it, light-DOM
+    // identity degrades to tagName + xpath, which a replaced or duplicated control
+    // at the same position satisfies. The id lives on the element itself, so it is
+    // stable across rebuilds and absent only when the physical node really changed.
+    const internalNodeId = getMagicBrowseDomNodeId(node);
+    if (internalNodeId) {
+      nodeData.internalNodeId = internalNodeId;
+    }
+    const mutationJournal = node.ownerDocument?.defaultView?.__magicBrowseFormMutationJournal;
+    if (mutationJournal && typeof mutationJournal.documentRef === 'string') {
+      nodeData.documentRef = mutationJournal.documentRef;
     }
 
     // Get attributes for interactive elements or potential text containers
@@ -1544,6 +1576,13 @@ window.buildDomTree = (
         if (node.value !== '') {
           nodeData.attributes.value = node.value;
         }
+        if (node instanceof HTMLInputElement && (node.type === 'checkbox' || node.type === 'radio')) {
+          if (node.checked) {
+            nodeData.attributes.checked = '';
+          } else {
+            delete nodeData.attributes.checked;
+          }
+        }
         if (node.readOnly) {
           nodeData.attributes.readonly = '';
         }
@@ -1557,9 +1596,17 @@ window.buildDomTree = (
         if (node.disabled) {
           nodeData.attributes.disabled = '';
         }
+      } else if (node instanceof HTMLOptionElement) {
+        if (node.selected) {
+          nodeData.attributes.selected = '';
+        } else {
+          delete nodeData.attributes.selected;
+        }
+        if (node.disabled) {
+          nodeData.attributes.disabled = '';
+        }
       } else if (
         node instanceof HTMLButtonElement ||
-        node instanceof HTMLOptionElement ||
         node instanceof HTMLOptGroupElement ||
         node instanceof HTMLFieldSetElement
       ) {
@@ -1629,7 +1676,7 @@ window.buildDomTree = (
             const iframeDoc = node.contentDocument || node.contentWindow?.document;
             if (iframeDoc && iframeDoc.childNodes) {
               for (const child of Array.from(iframeDoc.childNodes)) {
-                const domElement = buildDomTree(child, node, false, depth + 1, false);
+                const domElement = buildDomTree(child, node, false, depth + 1);
                 if (domElement) nodeData.children.push(domElement);
               }
             }
@@ -1652,7 +1699,7 @@ window.buildDomTree = (
       ) {
         // Process all child nodes to capture formatted text
         for (const child of Array.from(node.childNodes)) {
-          const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted, depth + 1, isInsideShadowTree);
+          const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted, depth + 1);
           if (domElement) nodeData.children.push(domElement);
         }
       } else {
@@ -1660,7 +1707,7 @@ window.buildDomTree = (
         if (node.shadowRoot) {
           nodeData.shadowRoot = true;
           for (const child of Array.from(node.shadowRoot.childNodes)) {
-            const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted, depth + 1, true);
+            const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted, depth + 1);
             if (domElement) nodeData.children.push(domElement);
           }
         }
@@ -1668,7 +1715,7 @@ window.buildDomTree = (
         for (const child of Array.from(node.childNodes)) {
           // Pass the highlighted status of the *current* node to its children
           const passHighlightStatusToChild = nodeWasHighlighted || isParentHighlighted;
-          const domElement = buildDomTree(child, parentIframe, passHighlightStatusToChild, depth + 1, isInsideShadowTree);
+          const domElement = buildDomTree(child, parentIframe, passHighlightStatusToChild, depth + 1);
           if (domElement) nodeData.children.push(domElement);
         }
       }

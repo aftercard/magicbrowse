@@ -159,9 +159,7 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
       ...(input.profile ? { profile: input.profile } : {}),
       ...(input.instruction ? { instruction: input.instruction } : {}),
       ...(input.activePageIdentity ? { activePageIdentity: input.activePageIdentity } : {}),
-      ...(input.redactionProfiles
-        ? { redactionProfiles: input.redactionProfiles }
-        : {}),
+      ...(input.redactionProfiles ? { redactionProfiles: input.redactionProfiles } : {}),
       events: [],
     };
 
@@ -286,10 +284,7 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
         const record = await this.requireRun(runId);
         const now = this.isoNow();
         const redactionProfiles = input.redactionProfiles
-          ? mergeExactValueRedactionProfiles(
-              record.redactionProfiles,
-              input.redactionProfiles
-            )
+          ? mergeExactValueRedactionProfiles(record.redactionProfiles, input.redactionProfiles)
           : record.redactionProfiles;
         const shouldScrubRecord = hasRedactionProfileChanges(
           record.redactionProfiles,
@@ -304,10 +299,7 @@ class FileMagicBrowseRunStore implements MagicBrowseRunStore {
             : {}),
           ...(input.activePageIdentity
             ? {
-                activePageIdentity: redactRunValue(
-                  input.activePageIdentity,
-                  redactionProfiles
-                ),
+                activePageIdentity: redactRunValue(input.activePageIdentity, redactionProfiles),
               }
             : {}),
           ...(input.redactionProfiles
@@ -577,11 +569,13 @@ function normalizeActivePageIdentity(value: unknown): MagicBrowseActivePageIdent
   }
 
   const targetId = readString(value.targetId);
+  const documentRef = readString(value.documentRef);
   const url = readString(value.url);
   const title = readString(value.title);
-  return targetId || url || title
+  return targetId || documentRef || url || title
     ? {
         ...(targetId ? { targetId } : {}),
+        ...(documentRef ? { documentRef } : {}),
         ...(url ? { url } : {}),
         ...(title ? { title } : {}),
       }

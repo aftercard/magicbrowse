@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 import { redactTransientImageDataUrls } from '../redaction.js';
@@ -10,6 +10,7 @@ import {
   type MessageManagerSnapshot,
 } from '../vendor/agent/messages/service.js';
 import { resolveMagicBrowseHome, type ResolveMagicBrowseHomeOptions } from './session-store.js';
+import { withFileMutationLock, writeJsonFileAtomically } from './file-mutation-lock.js';
 
 export const AGENT_SESSION_SCHEMA_VERSION = 1 as const;
 export const AGENT_SESSIONS_DIRNAME = 'agent-sessions';
@@ -19,6 +20,8 @@ export interface PersistedAgentSessionState extends ExecutorAgentState {
   readonly version: typeof AGENT_SESSION_SCHEMA_VERSION;
   readonly sessionId: string;
   readonly updatedAt: string;
+  readonly sessionRevision?: number;
+  readonly cleared?: true;
 }
 
 export interface AgentSessionStateLoadResult {
@@ -30,6 +33,12 @@ export interface AgentSessionStateStore {
   readonly agentSessionsDir: string;
   loadAgentState(sessionId: string): Promise<AgentSessionStateLoadResult>;
   saveAgentState(sessionId: string, state: ExecutorAgentState): Promise<void>;
+  saveAgentStateIfNewer(
+    sessionId: string,
+    state: ExecutorAgentState,
+    sessionRevision: number
+  ): Promise<boolean>;
+  clearAgentStateThroughRevision(sessionId: string, maxRevision: number): Promise<boolean>;
   clearAgentState(sessionId: string): Promise<void>;
 }
 
@@ -82,6 +91,10 @@ class FileAgentSessionStateStore implements AgentSessionStateStore {
       };
     }
 
+    if (normalized.cleared) {
+      return {};
+    }
+
     return {
       state: {
         tasks: normalized.tasks,
@@ -91,21 +104,87 @@ class FileAgentSessionStateStore implements AgentSessionStateStore {
   }
 
   async saveAgentState(sessionId: string, state: ExecutorAgentState): Promise<void> {
+    const targetPath = this.agentStatePath(sessionId);
+    await withFileMutationLock(targetPath, () => this.writeAgentState(sessionId, state));
+  }
+
+  async saveAgentStateIfNewer(
+    sessionId: string,
+    state: ExecutorAgentState,
+    sessionRevision: number
+  ): Promise<boolean> {
+    const targetPath = this.agentStatePath(sessionId);
+    return withFileMutationLock(targetPath, async () => {
+      const existing = await this.loadPersistedAgentState(sessionId);
+      if ((existing?.sessionRevision ?? 0) >= sessionRevision) {
+        return false;
+      }
+      await this.writeAgentState(sessionId, state, sessionRevision);
+      return true;
+    });
+  }
+
+  async clearAgentStateThroughRevision(sessionId: string, maxRevision: number): Promise<boolean> {
+    const targetPath = this.agentStatePath(sessionId);
+    return withFileMutationLock(targetPath, async () => {
+      const existing = await this.loadPersistedAgentState(sessionId);
+      if ((existing?.sessionRevision ?? 0) > maxRevision) {
+        return false;
+      }
+      await this.writeAgentState(
+        sessionId,
+        {
+          tasks: [],
+          messageManager: {
+            version: MESSAGE_MANAGER_SNAPSHOT_VERSION,
+            toolId: 1,
+            totalTokens: 0,
+            messages: [],
+          },
+        },
+        maxRevision,
+        true
+      );
+      return true;
+    });
+  }
+
+  async clearAgentState(sessionId: string): Promise<void> {
+    const targetPath = this.agentStatePath(sessionId);
+    await withFileMutationLock(targetPath, () => rm(targetPath, { force: true }));
+  }
+
+  private async loadPersistedAgentState(
+    sessionId: string
+  ): Promise<PersistedAgentSessionState | undefined> {
+    try {
+      const raw = await readFile(this.agentStatePath(sessionId), 'utf8');
+      return normalizePersistedAgentSessionState(JSON.parse(raw), sessionId);
+    } catch (error) {
+      if (getErrorCode(error) === 'ENOENT' || error instanceof SyntaxError) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  private async writeAgentState(
+    sessionId: string,
+    state: ExecutorAgentState,
+    sessionRevision?: number,
+    cleared = false
+  ): Promise<void> {
     const sanitizedState = stripTransientImagesFromAgentState(state);
     const persisted: PersistedAgentSessionState = {
       version: AGENT_SESSION_SCHEMA_VERSION,
       sessionId,
       updatedAt: this.now().toISOString(),
+      ...(sessionRevision !== undefined ? { sessionRevision } : {}),
+      ...(cleared ? { cleared: true as const } : {}),
       tasks: [...sanitizedState.tasks],
       messageManager: sanitizedState.messageManager,
     };
-
-    await mkdir(this.agentSessionsDir, { recursive: true });
-    await writeFile(this.agentStatePath(sessionId), `${JSON.stringify(persisted, null, 2)}\n`, 'utf8');
-  }
-
-  async clearAgentState(sessionId: string): Promise<void> {
-    await rm(this.agentStatePath(sessionId), { force: true });
+    await writeJsonFileAtomically(this.agentStatePath(sessionId), persisted);
   }
 
   private agentStatePath(sessionId: string): string {
@@ -123,6 +202,8 @@ function normalizePersistedAgentSessionState(
 
   const sessionId = readString(value.sessionId);
   const updatedAt = readString(value.updatedAt);
+  const sessionRevision = readNonNegativeInteger(value.sessionRevision);
+  const cleared = value.cleared === true;
   const tasks = Array.isArray(value.tasks)
     ? value.tasks.filter((task): task is string => typeof task === 'string' && task.length > 0)
     : undefined;
@@ -132,6 +213,8 @@ function normalizePersistedAgentSessionState(
     value.version !== AGENT_SESSION_SCHEMA_VERSION ||
     sessionId !== expectedSessionId ||
     !updatedAt ||
+    (value.sessionRevision !== undefined && sessionRevision === undefined) ||
+    (value.cleared !== undefined && !cleared) ||
     !tasks ||
     !messageManager
   ) {
@@ -142,6 +225,8 @@ function normalizePersistedAgentSessionState(
     version: AGENT_SESSION_SCHEMA_VERSION,
     sessionId,
     updatedAt,
+    ...(sessionRevision !== undefined && sessionRevision > 0 ? { sessionRevision } : {}),
+    ...(cleared ? { cleared: true as const } : {}),
     tasks,
     messageManager,
   };
@@ -157,7 +242,7 @@ function normalizeMessageManagerSnapshot(value: unknown): MessageManagerSnapshot
     ? value.messages.map(normalizeSerializedMessage)
     : undefined;
 
-  if (!toolId || !messages || messages.some(message => !message)) {
+  if (!toolId || !messages || messages.some((message) => !message)) {
     return undefined;
   }
 
@@ -205,7 +290,9 @@ function normalizeSerializedMessage(value: unknown): MessageManagerSerializedMes
   };
 }
 
-function normalizeMessageMetadata(value: unknown): MessageManagerSerializedMessage['metadata'] | undefined {
+function normalizeMessageMetadata(
+  value: unknown
+): MessageManagerSerializedMessage['metadata'] | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -215,24 +302,28 @@ function normalizeMessageMetadata(value: unknown): MessageManagerSerializedMessa
     return undefined;
   }
 
-  const messageType = value.message_type === null ? null : readString(value.message_type) ?? null;
+  const messageType = value.message_type === null ? null : (readString(value.message_type) ?? null);
   return {
     tokens,
     message_type: messageType,
   };
 }
 
-function normalizeMessageContent(value: unknown): MessageManagerSerializedMessage['content'] | undefined {
+function normalizeMessageContent(
+  value: unknown
+): MessageManagerSerializedMessage['content'] | undefined {
   if (typeof value === 'string') {
     return value;
   }
   if (Array.isArray(value) && value.every(isRecord)) {
-    return value.map(item => ({ ...item }));
+    return value.map((item) => ({ ...item }));
   }
   return undefined;
 }
 
-function normalizeToolCalls(value: unknown): MessageManagerSerializedMessage['toolCalls'] | undefined {
+function normalizeToolCalls(
+  value: unknown
+): MessageManagerSerializedMessage['toolCalls'] | undefined {
   if (value === undefined) {
     return undefined;
   }
@@ -330,7 +421,9 @@ function sanitizeMessageContent(
   return sanitized as MessageManagerSerializedMessage['content'];
 }
 
-function isTextContentItem(value: unknown): value is { readonly type: 'text'; readonly text: string } {
+function isTextContentItem(
+  value: unknown
+): value is { readonly type: 'text'; readonly text: string } {
   return isRecord(value) && value.type === 'text' && typeof value.text === 'string';
 }
 
@@ -350,6 +443,13 @@ function readString(value: unknown): string | undefined {
 
 function readPositiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function readNonNegativeInteger(value: unknown): number | undefined {
+  if (value === undefined) {
+    return 0;
+  }
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 function readNonNegativeNumber(value: unknown): number | undefined {

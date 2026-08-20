@@ -81,9 +81,9 @@ function mapClickActionBlockedReason(
     case 'target_not_found':
     case 'stale_target':
     case undefined:
-    default:
       return 'stale_target';
   }
+  return 'stale_target';
 }
 
 function block(

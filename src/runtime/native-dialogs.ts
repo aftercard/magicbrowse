@@ -1,9 +1,6 @@
 import type { Dialog, Page } from 'puppeteer-core';
 
-import {
-  redactSensitiveText,
-  type ExactValueRedactionProfiles,
-} from '../redaction.js';
+import { redactSensitiveText, type ExactValueRedactionProfiles } from '../redaction.js';
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
 import type {
   MagicBrowseBrowserDialogHandled,
@@ -22,6 +19,7 @@ export interface AttachNativeBrowserDialogGuardOptions {
   readonly runRecorder?: MagicBrowseRunRecorder;
   readonly actId?: string;
   readonly redactionProfiles?: ExactValueRedactionProfiles;
+  readonly omitMessage?: boolean;
 }
 
 export function attachNativeBrowserDialogGuard(
@@ -74,7 +72,9 @@ async function handleDialog(
   options: AttachNativeBrowserDialogGuardOptions
 ): Promise<MagicBrowseBrowserDialogSnapshot> {
   const type = normalizeDialogType(dialog.type());
-  const message = redactDialogMessage(dialog.message(), options.redactionProfiles);
+  const message = options.omitMessage
+    ? undefined
+    : redactDialogMessage(dialog.message(), options.redactionProfiles);
   const handled = await handleDialogByType(dialog, type);
   const snapshot: MagicBrowseBrowserDialogSnapshot = {
     type,

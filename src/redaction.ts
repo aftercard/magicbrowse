@@ -4,8 +4,7 @@ const REDACTED = '[REDACTED]';
 export const REDACTED_IMAGE_DATA_URL = '[REDACTED_IMAGE_DATA_URL]';
 const TRUNCATION_LIMIT = 500_000;
 const MAX_DEPTH = 20;
-const TRANSIENT_IMAGE_DATA_URL_PATTERN =
-  /\bdata:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+/g;
+const TRANSIENT_IMAGE_DATA_URL_PATTERN = /\bdata:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+/g;
 
 const SENSITIVE_KEY_PARTS = new Set([
   'password',
@@ -98,6 +97,9 @@ export function buildExactValueRedactionProfile(
   addDateDerivedValues(exactValues, values.date_of_birth);
   addPanDerivedValues(exactValues, digitValues, values.pan);
   addExpiryDerivedValues(exactValues, values.exp_month, values.exp_year);
+  for (const value of [...exactValues]) {
+    addEncodedExactValues(exactValues, value);
+  }
 
   const rules: Record<string, ExactValueRedactionRule> = {};
   let index = 0;
@@ -203,7 +205,9 @@ function redactValue(
   return out;
 }
 
-function normalizeExactValueRedactionProfile(value: unknown): ExactValueRedactionProfile | undefined {
+function normalizeExactValueRedactionProfile(
+  value: unknown
+): ExactValueRedactionProfile | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return undefined;
   }
@@ -410,6 +414,15 @@ function addExactValue(values: Set<string>, value: string | undefined): void {
   if (normalized.length >= 3) {
     values.add(normalized);
   }
+}
+
+function addEncodedExactValues(values: Set<string>, value: string): void {
+  let encoded = value;
+  for (let index = 0; index < 2; index += 1) {
+    encoded = encodeURIComponent(encoded);
+    addExactValue(values, encoded);
+  }
+  addExactValue(values, encodeURIComponent(value).replace(/%20/g, '+'));
 }
 
 function normalizeDate(value: string | undefined): string | undefined {

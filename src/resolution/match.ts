@@ -352,16 +352,15 @@ function isMagicBrowseMatchApplicability(value: unknown): value is MagicBrowseMa
   return record.target === 'host' && typeof record.value === 'string';
 }
 
-function isMagicBrowseExternalResolvePlan(value: unknown): value is MagicBrowseMatchExternalResolvePlan {
+function isMagicBrowseExternalResolvePlan(
+  value: unknown
+): value is MagicBrowseMatchExternalResolvePlan {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return false;
   }
 
   const record = value as Partial<MagicBrowseMatchExternalResolvePlan>;
-  return (
-    record.kind === 'external_lookup' &&
-    typeof record.key === 'string'
-  );
+  return record.kind === 'external_lookup' && typeof record.key === 'string';
 }
 
 function applicabilityMatches(

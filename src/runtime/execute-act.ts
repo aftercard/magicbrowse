@@ -8,6 +8,7 @@ import { Actors, ExecutionState, type AgentEvent } from '../vendor/agent/event/t
 import type {
   MagicBrowseActivePageIdentity,
   MagicBrowseActBlockedReason,
+  MagicBrowseActFailureCode,
   MagicBrowseActHandoff,
   MagicBrowseActOptions,
   MagicBrowseActResult,
@@ -15,14 +16,30 @@ import type {
   MagicBrowseStepEvent,
   MagicBrowseTrustedRuntimeEvidence,
 } from '../types.js';
+import {
+  ChatModelAuthError,
+  ChatModelBadRequestError,
+  ChatModelForbiddenError,
+  ChatModelPaymentError,
+  MaxFailuresReachedError,
+  RequestCancelledError,
+  isAbortedError,
+} from '../vendor/agent/agents/errors.js';
 import { readPageIdentity } from '../transport/page-resolver.js';
 import type { MagicBrowseRunRecorder } from '../transport/run-store.js';
 import { attachNativeBrowserDialogGuard } from './native-dialogs.js';
+import {
+  DEFAULT_BROWSER_ACTION_TIMEOUT_MS,
+  isBrowserActionDeadlineError,
+  normalizeBrowserActionTimeoutMs,
+} from './browser-action-deadline.js';
 import {
   redactSensitiveText,
   redactSensitiveValue,
   type ExactValueRedactionProfiles,
 } from '../redaction.js';
+
+const ACT_CLEANUP_TIMEOUT_MS = 2_000;
 
 export interface ExecuteMagicBrowseActInput {
   readonly browser: Browser;
@@ -34,6 +51,8 @@ export interface ExecuteMagicBrowseActInput {
   readonly initialAgentState?: ExecutorAgentState;
   readonly redactionProfiles?: ExactValueRedactionProfiles;
   readonly trustedRuntimeEvidence?: readonly MagicBrowseTrustedRuntimeEvidence[];
+  /** Internal override; the public surface is owned by the session boundary. */
+  readonly browserActionTimeoutMs?: number;
 }
 
 export interface ExecuteMagicBrowseActResult {
@@ -62,6 +81,11 @@ export async function executeMagicBrowseAct(
     displayHighlights: input.displayHighlights,
     maxSteps: actOpts.maxSteps ?? DEFAULT_GENERAL_SETTINGS.maxSteps,
     useVision: actOpts.useVision === true,
+    planningInterval: resolvePlanningInterval(actOpts.experimentalPlanningInterval),
+    // Step-history persistence for the flow recorder; default-off env gate.
+    replayHistoricalTasks:
+      process.env.MAGICBROWSE_EXPERIMENTAL_STEP_HISTORY === '1' ||
+      DEFAULT_GENERAL_SETTINGS.replayHistoricalTasks,
   };
   const ctx = new BrowserContext(
     input.browser,
@@ -88,6 +112,9 @@ export async function executeMagicBrowseAct(
       maxSteps: generalSettings.maxSteps,
       maxFailures: generalSettings.maxFailures,
       maxActionsPerStep: generalSettings.maxActionsPerStep,
+      browserActionTimeoutMs: normalizeBrowserActionTimeoutMs(
+        actOpts.timeoutMs ?? input.browserActionTimeoutMs ?? DEFAULT_BROWSER_ACTION_TIMEOUT_MS
+      ),
       useVision: generalSettings.useVision,
       useVisionForPlanner: true,
       planningInterval: generalSettings.planningInterval,
@@ -97,6 +124,7 @@ export async function executeMagicBrowseAct(
     browserStateTextProjector: createBrowserStateTextProjector(input.redactionProfiles),
     experimentalMemoryHints: actOpts.experimentalMemoryHints,
     trustedRuntimeEvidence: input.trustedRuntimeEvidence,
+    signal: actOpts.signal,
   });
 
   const detachBrowserConsole = attachBrowserConsoleRecorder(
@@ -149,7 +177,7 @@ export async function executeMagicBrowseAct(
       ...(event.data.blockedReason ? { blockedReason: event.data.blockedReason } : {}),
       ...(event.data.actionName ? { actionName: event.data.actionName } : {}),
       step: event.data.step,
-      maxSteps: event.data.maxSteps,
+      ...(event.data.maxSteps === undefined ? {} : { maxSteps: event.data.maxSteps }),
       timestamp: event.timestamp,
     };
     const safeProjected = redactMagicBrowseStepEventForOutput(
@@ -174,14 +202,8 @@ export async function executeMagicBrowseAct(
       const projectedStatus = projectSystemEventStatus(event);
       if (projectedStatus) {
         finalStatus = projectedStatus;
-        finalMessage = redactFinalMessageForOutput(
-          event.data.details,
-          input.redactionProfiles
-        );
-        finalHandoff = redactValueForOutput(
-          event.data.handoff,
-          input.redactionProfiles
-        );
+        finalMessage = redactFinalMessageForOutput(event.data.details, input.redactionProfiles);
+        finalHandoff = redactValueForOutput(event.data.handoff, input.redactionProfiles);
         finalBlockedReason = event.data.blockedReason;
       }
     }
@@ -193,30 +215,78 @@ export async function executeMagicBrowseAct(
   } catch (error) {
     executeError = error;
   } finally {
-    await nativeDialog.settle();
+    await settleActCleanup(nativeDialog.settle());
     nativeDialog.detach();
     executor.clearExecutionEvents();
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     detachBrowserConsole();
     disableDebug();
-    await input.runRecorder?.flush();
+    if (input.runRecorder) {
+      await settleActCleanup(input.runRecorder.flush());
+    }
   }
 
   const blockingDialog = nativeDialog.blockingDialog();
-  if (executeError && !blockingDialog) {
-    throw executeError;
+  const deadlineError = isBrowserActionDeadlineError(executeError) ? executeError : undefined;
+  let failureClassification: TerminalErrorClassification | undefined;
+  if (executeError && !deadlineError && !blockingDialog) {
+    // The agent must never surface a raw exception to callers: every terminal
+    // failure becomes a structured result the CLI/chat layer can hand over.
+    failureClassification = classifyTerminalError(executeError);
+    finalStatus = failureClassification.status;
+    finalBlockedReason = undefined;
+    finalHandoff = undefined;
+    finalMessage = redactFinalMessageForOutput(
+      failureClassification.message,
+      input.redactionProfiles
+    );
+    await input.runRecorder?.append({
+      type: 'act.error',
+      level: 'error',
+      actId: input.actId,
+      data: {
+        status: finalStatus,
+        ...(failureClassification.failureCode
+          ? { failureCode: failureClassification.failureCode }
+          : {}),
+        message: finalMessage,
+      },
+    });
   }
-  if (blockingDialog) {
+  if (deadlineError) {
+    finalStatus = deadlineError.code === 'action_timeout' ? 'timed_out' : 'cancelled';
+    finalBlockedReason = undefined;
+    finalHandoff = undefined;
+    finalMessage = deadlineError.message;
+  } else if (blockingDialog) {
     finalStatus = 'blocked';
     finalBlockedReason = 'browser_dialog_open';
     finalHandoff = undefined;
     finalMessage = `Browser ${blockingDialog.type} dialog opened during act.`;
   }
+  // Event-terminated failures (executor swallowed the error into TASK_FAIL)
+  // still deserve a machine-readable cause and retry hint.
+  if (!failureClassification && finalStatus === 'failed') {
+    const terminalError = executor.getLastTerminalError?.();
+    if (terminalError !== undefined) {
+      failureClassification = classifyTerminalError(terminalError);
+    }
+  }
   const handledDialog = nativeDialog.lastDialog();
-  const finalPage = await ctx.getCurrentPuppeteerPage();
-  const finalUrl = finalPage.url();
-  const activePageIdentity = await readPageIdentity(finalPage);
-  await ctx.cleanup();
+  let finalUrl = '';
+  let activePageIdentity: MagicBrowseActivePageIdentity = {};
+  if (!deadlineError) {
+    // A dead browser must not turn a structured failure back into a throw.
+    try {
+      const finalPage = await ctx.getCurrentPuppeteerPage();
+      finalUrl = finalPage.url();
+      activePageIdentity = await readPageIdentity(finalPage);
+    } catch {
+      finalUrl = '';
+      activePageIdentity = {};
+    }
+  }
+  await settleActCleanup(ctx.cleanup());
 
   return {
     result: {
@@ -226,11 +296,85 @@ export async function executeMagicBrowseAct(
       finalMessage,
       ...(finalHandoff ? { handoff: finalHandoff } : {}),
       ...(finalBlockedReason ? { blockedReason: finalBlockedReason } : {}),
+      ...(failureClassification?.failureCode && finalStatus === 'failed'
+        ? { failureCode: failureClassification.failureCode }
+        : {}),
       ...(handledDialog ? { dialog: handledDialog } : {}),
+      ...(deadlineError
+        ? {
+            retryable: true as const,
+            mutationState: deadlineError.mutationState,
+            recovery: deadlineError.recovery,
+          }
+        : failureClassification?.retryable && finalStatus === 'failed'
+          ? { retryable: true as const }
+          : {}),
     },
     activePageIdentity,
     agentState: executor.getAgentState(),
   };
+}
+
+interface TerminalErrorClassification {
+  readonly status: Extract<MagicBrowseActStatus, 'failed' | 'cancelled'>;
+  readonly message: string;
+  readonly failureCode?: MagicBrowseActFailureCode;
+  readonly retryable?: true;
+}
+
+/**
+ * Map a terminal executor error onto the structured act contract. Provider
+ * account errors (payment/auth/forbidden) are hard stops — retrying cannot
+ * succeed until the account is fixed — while budget exhaustion and unknown
+ * infrastructure errors are worth one retry.
+ */
+function classifyTerminalError(error: unknown): TerminalErrorClassification {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof RequestCancelledError || isAbortedError(error)) {
+    return { status: 'cancelled', message };
+  }
+  if (error instanceof ChatModelPaymentError) {
+    return {
+      status: 'failed',
+      failureCode: 'llm_provider_payment_required',
+      message: `The planning model provider rejected the request as unpaid: ${message}`,
+    };
+  }
+  if (error instanceof ChatModelAuthError) {
+    return { status: 'failed', failureCode: 'llm_provider_auth', message };
+  }
+  if (error instanceof ChatModelForbiddenError) {
+    return { status: 'failed', failureCode: 'llm_provider_forbidden', message };
+  }
+  if (error instanceof ChatModelBadRequestError) {
+    return { status: 'failed', failureCode: 'llm_request_invalid', message };
+  }
+  if (error instanceof MaxFailuresReachedError) {
+    return { status: 'failed', failureCode: 'max_failures', message, retryable: true };
+  }
+  return { status: 'failed', failureCode: 'internal_error', message, retryable: true };
+}
+
+export const __testExecuteAct = {
+  classifyTerminalError,
+};
+
+async function settleActCleanup(task: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = Promise.resolve(task).then(
+    () => undefined,
+    () => undefined
+  );
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ACT_CLEANUP_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([settled, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    void settled.catch(() => undefined);
+  }
 }
 
 function projectSystemEventStatus(event: AgentEvent): MagicBrowseActStatus | undefined {
@@ -294,14 +438,24 @@ function resolveActLlms(options: MagicBrowseActOptions): {
   );
 }
 
+// Baseline scrubbing (truncation, image data URLs, bearer tokens, JWTs, api
+// keys) is profile-independent and must cover the whole run, including the
+// browsing that happens before any protected value exists. A profile widens
+// what is redacted; it never switches redaction on.
 function createBrowserStateTextProjector(
   redactionProfiles: ExactValueRedactionProfiles | undefined
-): ((text: string) => string) | undefined {
-  if (!redactionProfiles) {
-    return undefined;
-  }
-
+): (text: string) => string {
   return (text: string) => redactSensitiveText(text, { redactionProfiles });
+}
+
+function resolvePlanningInterval(requested: number | undefined): number {
+  if (requested === undefined) {
+    return DEFAULT_GENERAL_SETTINGS.planningInterval;
+  }
+  if (!Number.isInteger(requested) || requested < 1 || requested > 50) {
+    throw new Error(`Invalid experimentalPlanningInterval: ${requested} (expected integer 1..50)`);
+  }
+  return requested;
 }
 
 function attachBrowserConsoleRecorder(
@@ -348,10 +502,6 @@ function redactFinalMessageForOutput(
   message: string,
   redactionProfiles: ExactValueRedactionProfiles | undefined
 ): string {
-  if (!redactionProfiles) {
-    return message;
-  }
-
   return redactSensitiveText(message, { redactionProfiles });
 }
 
@@ -359,7 +509,10 @@ function redactValueForOutput<T>(
   value: T,
   redactionProfiles: ExactValueRedactionProfiles | undefined
 ): T {
-  if (!redactionProfiles) {
+  // `redactSensitiveValue` renders undefined as the literal '[undefined]' for
+  // log readability. Nothing here is a log, and an absent optional must stay
+  // absent, so short-circuit before that. Undefined carries nothing to redact.
+  if (value === undefined) {
     return value;
   }
 

@@ -23,6 +23,7 @@ export type RawDomElementNode = {
   viewportInfo?: ViewportInfo;
   shadowRoot?: boolean;
   internalNodeId?: string;
+  documentRef?: string;
 };
 
 export type RawDomTreeNode = RawDomTextNode | RawDomElementNode;

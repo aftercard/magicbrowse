@@ -13,7 +13,11 @@ import type {
   MagicBrowseDeterministicActionResult,
   MagicBrowseDeterministicActionStatus,
   MagicBrowseDeterministicActionVerb,
+  MagicBrowseDeterministicActionVerification,
+  MagicBrowseDeterministicActionVerificationStrategy,
   MagicBrowseFillOptions,
+  MagicBrowseFieldControlKind,
+  MagicBrowseFieldControlOption,
   MagicBrowseFillableTargetContext,
   MagicBrowseFillableTargetDescriptor,
   MagicBrowseFillableTargetFormContext,
@@ -40,9 +44,7 @@ import type {
   MagicBrowseSubmitFormTargetResult,
   MagicBrowseTypeOptions,
 } from './types.js';
-import { createMagicBrowseSessionManager } from './transport/session-manager.js';
-
-const defaultSessionManager = createMagicBrowseSessionManager();
+import { defaultSessionManager } from './session-manager-instance.js';
 
 export async function launch(
   options: MagicBrowseLaunchOptions = {}
@@ -208,6 +210,7 @@ export {
 export {
   buildMemoryMatchPrompt,
   matchMemoryTargets,
+  memoryDescriptorMatchJsonSchema,
 } from './resolution/memory-match.js';
 export type {
   MagicBrowseMemoryDelegatedArtifactReader as MemoryDelegatedFillArtifactReader,
@@ -244,8 +247,26 @@ export {
 export { redactSensitiveText, redactSensitiveValue } from './redaction.js';
 export { buildExactValueRedactionProfile } from './redaction.js';
 export {
-  MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA,
-} from './resolution/semantic-match.js';
+  buildMagicBrowseFormContractPrompt,
+  compileMagicBrowseFormContract,
+  magicBrowseFormContractJsonSchema,
+  MAGICBROWSE_FORM_CONTRACT_JSON_SCHEMA,
+} from './resolution/form-contract.js';
+export type {
+  CompileMagicBrowseFormContractInput,
+  CompileMagicBrowseFormContractResult,
+  MagicBrowseFormContract,
+  MagicBrowseFormControl,
+  MagicBrowseFormControlOption,
+  MagicBrowseFormContractClassification,
+  MagicBrowseFormContractCompilerModel,
+  MagicBrowseFormContractCompilerRequest,
+  MagicBrowseFormFieldIntent,
+  MagicBrowseFormFieldRelevance,
+  MagicBrowseFormFieldSensitivity,
+  MagicBrowseFormSubjectMode,
+} from './resolution/form-contract.js';
+export { MAGICBROWSE_SEMANTIC_MATCH_JSON_SCHEMA } from './resolution/semantic-match.js';
 export type { AgentEvent } from './vendor/agent/event/types.js';
 export type {
   MagicBrowseActOptions,
@@ -263,6 +284,8 @@ export type {
   MagicBrowseBrowserDialogHandled,
   MagicBrowseBrowserDialogSnapshot,
   MagicBrowseBrowserDialogType,
+  MagicBrowseActionProgressEvidence,
+  MagicBrowseActionProgressKind,
   MagicBrowseClickOptions,
   MagicBrowseCloseOptions,
   MagicBrowseCloudProviderMetadata,
@@ -270,7 +293,11 @@ export type {
   MagicBrowseDeterministicActionResult,
   MagicBrowseDeterministicActionStatus,
   MagicBrowseDeterministicActionVerb,
+  MagicBrowseDeterministicActionVerification,
+  MagicBrowseDeterministicActionVerificationStrategy,
   MagicBrowseFillOptions,
+  MagicBrowseFieldControlKind,
+  MagicBrowseFieldControlOption,
   MagicBrowseFillableTargetContext,
   MagicBrowseFillableTargetDescriptor,
   MagicBrowseFillableTargetFormContext,
@@ -353,3 +380,24 @@ export type {
   ExactValueRedactionRule,
   ExactValueRedactionProfiles,
 } from './redaction.js';
+
+export { replay } from './replay/replay.js';
+export type {
+  MagicBrowseReplayEvent,
+  MagicBrowseReplayOptions,
+  MagicBrowseReplayResult,
+  MagicBrowseReplayStatus,
+} from './replay/replay.js';
+export { flowDefinitionSchema, parseFlowDefinition } from './replay/flow-schema.js';
+export type {
+  MagicBrowseFlowDefinition,
+  MagicBrowseFlowStep,
+  MagicBrowseFlowTargetQuery,
+} from './replay/flow-schema.js';
+export { replayOrAct, composeReplayOrAct } from './replay/replay-or-act.js';
+export type {
+  MagicBrowseReplayOrActOptions,
+  MagicBrowseReplayOrActResult,
+} from './replay/replay-or-act.js';
+export { buildDraftFlow, deriveFlowSkeleton } from './replay/derive.js';
+export type { DerivedFlowSkeleton, PersistedStepHistory } from './replay/derive.js';

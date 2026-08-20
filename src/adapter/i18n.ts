@@ -24,10 +24,7 @@ function isSupportedLocale(value: string): value is SupportedLocale {
 function normalizeLocale(raw: string | undefined): SupportedLocale {
   if (!raw) return DEFAULT_LOCALE;
 
-  const normalized = raw
-    .split('.')[0]
-    ?.split('@')[0]
-    ?.replace(/-/g, '_') ?? '';
+  const normalized = raw.split('.')[0]?.split('@')[0]?.replace(/-/g, '_') ?? '';
 
   if (isSupportedLocale(normalized)) {
     return normalized;
@@ -44,7 +41,7 @@ function resolveDefaultLocale(): SupportedLocale {
     process.env.MAGICBROWSE_LOCALE ||
       process.env.LC_ALL ||
       process.env.LC_MESSAGES ||
-      process.env.LANG,
+      process.env.LANG
   );
 }
 
@@ -75,7 +72,10 @@ function applyPlaceholders(message: string, value: MessageValue): string {
   return result;
 }
 
-function applySubstitutions(message: string, substitutions?: readonly (string | number | boolean)[]): string {
+function applySubstitutions(
+  message: string,
+  substitutions?: readonly (string | number | boolean)[]
+): string {
   if (!substitutions) {
     return message;
   }

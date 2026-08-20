@@ -30,10 +30,13 @@ import {
   ChatModelAuthError,
   ChatModelBadRequestError,
   ChatModelForbiddenError,
+  ChatModelPaymentError,
   ExtensionConflictError,
   RequestCancelledError,
   MaxStepsReachedError,
   MaxFailuresReachedError,
+  REPEATED_STALE_TARGET_MESSAGE,
+  RepeatedStaleTargetError,
 } from './agents/errors.js';
 import { URLNotAllowedError } from '../browser/views.js';
 import { chatHistoryStore } from '../../adapter/storage-stubs.js';
@@ -42,6 +45,7 @@ import type { GeneralSettingsConfig } from '../../adapter/storage-stubs.js';
 import { analytics } from '../../adapter/analytics-stub.js';
 import type { MessageManagerSnapshot } from './messages/service.js';
 import type { MagicBrowseTrustedRuntimeEvidence } from '../../types.js';
+import { isBrowserActionDeadlineError } from '../../runtime/browser-action-deadline.js';
 
 const logger = createLogger('Executor');
 
@@ -62,6 +66,7 @@ export interface ExecutorExtraArgs {
   browserStateTextProjector?: BrowserStateTextProjector;
   experimentalMemoryHints?: PromptMemoryHints;
   trustedRuntimeEvidence?: readonly MagicBrowseTrustedRuntimeEvidence[];
+  signal?: AbortSignal;
 }
 
 type PlannerTerminalStatus = Exclude<PlannerOutput['status'], 'continue'>;
@@ -88,6 +93,8 @@ export class Executor {
   private readonly navigatorPrompt: NavigatorPrompt;
   private readonly generalSettings: GeneralSettingsConfig | undefined;
   private tasks: string[] = [];
+  /** Terminal error captured by execute()'s catch, for boundary classification. */
+  private lastTerminalError: unknown;
   constructor(
     task: string,
     taskId: string,
@@ -108,6 +115,7 @@ export class Executor {
       extraArgs?.agentOptions ?? {},
       extraArgs?.browserStateTextProjector,
       extraArgs?.trustedRuntimeEvidence,
+      extraArgs?.signal,
     );
 
     this.generalSettings = extraArgs?.generalSettings;
@@ -162,6 +170,11 @@ export class Executor {
     this.context.actionResults = this.context.actionResults.filter(result => result.includeInMemory);
   }
 
+  /** Error that terminated execute(), when the run did not end via events. */
+  getLastTerminalError(): unknown {
+    return this.lastTerminalError;
+  }
+
   getAgentState(): ExecutorAgentState {
     return {
       tasks: [...this.tasks],
@@ -171,7 +184,17 @@ export class Executor {
 
   private handlePlannerOutcome(planOutput: AgentOutput<PlannerOutput> | null): PlannerOutcomeAction {
     const result = planOutput?.result;
-    if (!result || result.status === 'continue') {
+    if (!result) {
+      // PlannerAgent.execute() returns a validation failure as `{ id, error }` instead of throwing,
+      // so runPlanner's catch never sees it. The planner owns needs_approval / needs_handoff /
+      // blocked, so a malformed verdict must consume the failure budget instead of being read as
+      // "continue" and letting the navigator keep acting on a live page.
+      if (planOutput?.error) {
+        this.registerPlannerFailure(planOutput.error);
+      }
+      return { type: 'continue' };
+    }
+    if (result.status === 'continue') {
       return { type: 'continue' };
     }
 
@@ -278,7 +301,36 @@ export class Executor {
         // Note: We don't track pause as it's not a final state
       }
     } catch (error) {
-      if (error instanceof RequestCancelledError) {
+      this.lastTerminalError = error;
+      if (error instanceof RepeatedStaleTargetError) {
+        this.context.finalAnswer = REPEATED_STALE_TARGET_MESSAGE;
+        this.context.emitEvent(
+          Actors.SYSTEM,
+          ExecutionState.TASK_OK,
+          REPEATED_STALE_TARGET_MESSAGE,
+          {
+            kind: 'system.blocked',
+            blockedReason: 'no_path',
+          },
+        );
+      } else if (isBrowserActionDeadlineError(error)) {
+        this.context.emitEvent(
+          Actors.SYSTEM,
+          error.code === 'action_cancelled'
+            ? ExecutionState.TASK_CANCEL
+            : ExecutionState.TASK_FAIL,
+          error.message
+        );
+        if (error.code === 'action_cancelled') {
+          void analytics.trackTaskCancelled(this.context.taskId);
+        } else {
+          void analytics.trackTaskFailed(
+            this.context.taskId,
+            analytics.categorizeError(error)
+          );
+        }
+        throw error;
+      } else if (error instanceof RequestCancelledError) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, t('exec_task_cancel'));
 
         // Track task cancellation
@@ -292,6 +344,7 @@ export class Executor {
         void analytics.trackTaskFailed(this.context.taskId, errorCategory);
       }
     } finally {
+      this.context.disposeCancellation();
       if (process.env.NODE_ENV === 'development') {
         logger.debug('Executor history', JSON.stringify(this.context.history, null, 2));
       }
@@ -309,10 +362,13 @@ export class Executor {
   private async runPlanner(): Promise<AgentOutput<PlannerOutput> | null> {
     const context = this.context;
     try {
+      context.controller.signal.throwIfAborted();
       await this.navigator.addStateMessageToMemory();
+      context.controller.signal.throwIfAborted();
       const positionForPlan = this.context.messageManager.length() - 1;
 
       const planOutput = await this.planner.execute();
+      context.controller.signal.throwIfAborted();
       if (planOutput.result) {
         this.context.messageManager.addPlan(JSON.stringify(planOutput.result), positionForPlan);
       }
@@ -323,18 +379,29 @@ export class Executor {
         error instanceof ChatModelAuthError ||
         error instanceof ChatModelBadRequestError ||
         error instanceof ChatModelForbiddenError ||
+        error instanceof ChatModelPaymentError ||
         error instanceof URLNotAllowedError ||
         error instanceof RequestCancelledError ||
+        isBrowserActionDeadlineError(error) ||
         error instanceof ExtensionConflictError
       ) {
         throw error;
       }
-      context.consecutiveFailures++;
-      logger.error(`Failed to execute planner: ${error}`);
-      if (context.consecutiveFailures >= context.options.maxFailures) {
-        throw new MaxFailuresReachedError(t('exec_errors_maxFailuresReached'));
-      }
+      this.registerPlannerFailure(error instanceof Error ? error.message : String(error));
       return null;
+    }
+  }
+
+  /**
+   * Count one failed planner turn against the shared failure budget, whether the planner threw or
+   * returned its failure as a value, and stop the run once the budget is exhausted.
+   */
+  private registerPlannerFailure(reason: string): void {
+    const context = this.context;
+    context.consecutiveFailures++;
+    logger.error(`Failed to execute planner: ${reason}`);
+    if (context.consecutiveFailures >= context.options.maxFailures) {
+      throw new MaxFailuresReachedError(t('exec_errors_maxFailuresReached'));
     }
   }
 
@@ -411,8 +478,10 @@ export class Executor {
         error instanceof ChatModelAuthError ||
         error instanceof ChatModelBadRequestError ||
         error instanceof ChatModelForbiddenError ||
+        error instanceof RepeatedStaleTargetError ||
         error instanceof URLNotAllowedError ||
         error instanceof RequestCancelledError ||
+        isBrowserActionDeadlineError(error) ||
         error instanceof ExtensionConflictError
       ) {
         throw error;
@@ -448,7 +517,7 @@ export class Executor {
   }
 
   async cancel(): Promise<void> {
-    this.context.stop();
+    await this.context.stop();
   }
 
   async resume(): Promise<void> {
